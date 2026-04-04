@@ -1,0 +1,125 @@
+### Script for running panaroo on 745 isolates 
+#! /bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH -J  panaroo
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=short 
+#SBATCH --mem=48G
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/panaroo_1.6.0
+
+
+mkdir panaroo_results
+panaroo -i /mnt/shared/scratch/hhocking/bakta_resultsL/*/*.gff3 \
+-o /mnt/shared/scratch/hhocking/panaroo_resultsL \
+--clean-mode strict -t 8 \
+--remove-invalid-genes \
+
+### script for running panaroo on 149 Tanzanian isolates 
+#! /bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH -J  panaroo
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=medium
+#SBATCH --mem=48G
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/panaroo_1.6.0
+
+
+mkdir -p panaroo_TZ
+panaroo -i /mnt/shared/scratch/hhocking/gff_TZ/*.gff3 \
+-o /mnt/shared/scratch/hhocking/panaroo_TZ \
+--clean-mode strict -t 8 \
+--remove-invalid-genes 
+
+#### panaroo multi-sequence alignment script for 745 isolates #####
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=panaroo_msa
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --partition=medium
+#SBATCH --mem=48G
+#SBATCH --output=logs/panaroo_msa_%j.out
+#SBATCH --error=logs/panaroo_msa_%j.err
+
+# Create log directory
+mkdir -p /mnt/shared/scratch/hhocking/logs
+
+# Activate conda environment
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/panaroo_1.6.0
+
+# --- Paths ---
+PANAROO_DIR="/mnt/shared/scratch/hhocking/panaroo_resultsL"
+
+# Check input directory exists
+if [ ! -d "${PANAROO_DIR}" ]; then
+    echo "ERROR: Panaroo results directory not found: ${PANAROO_DIR}"
+    exit 1
+fi
+
+echo "Running panaroo-msa on: ${PANAROO_DIR}"
+echo "Threads: ${SLURM_CPUS_PER_TASK}"
+
+panaroo-msa \
+    -o ${PANAROO_DIR} \
+    -a core \
+    --aligner mafft \
+    -t ${SLURM_CPUS_PER_TASK}
+
+# Check output was created
+if [ -f "${PANAROO_DIR}/core_gene_alignment.aln" ]; then
+    echo "Success: core_gene_alignment.aln created"
+else
+    echo "WARNING: core_gene_alignment.aln not found - check logs for errors"
+    exit 1
+fi
+
+ ###### panaroo-msa for Tanzanian isolates ####
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=panaroo_msa
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --partition=medium
+#SBATCH --mem=48G
+#SBATCH --output=logs/panaroo_msa_%j.out
+#SBATCH --error=logs/panaroo_msa_%j.err
+
+# Create log directory
+mkdir -p /mnt/shared/scratch/hhocking/logs
+
+# Activate conda environment
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/panaroo_1.6.0
+
+# --- Paths ---
+PANAROO_DIR="/mnt/shared/scratch/hhocking/panaroo_TZ"
+
+# Check input directory exists
+if [ ! -d "${PANAROO_DIR}" ]; then
+    echo "ERROR: Panaroo results directory not found: ${PANAROO_DIR}"
+    exit 1
+fi
+
+echo "Running panaroo-msa on: ${PANAROO_DIR}"
+echo "Threads: ${SLURM_CPUS_PER_TASK}"
+
+panaroo-msa \
+    -o ${PANAROO_DIR} \
+    -a core \
+    --aligner mafft \
+    -t ${SLURM_CPUS_PER_TASK}
+
+# Check output was created
+if [ -f "${PANAROO_DIR}/core_gene_alignment.aln" ]; then
+    echo "Success: core_gene_alignment.aln created"
+else
+    echo "WARNING: core_gene_alignment.aln not found - check logs for errors"
+    exit 1
+fi
