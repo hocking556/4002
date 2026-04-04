@@ -1,0 +1,402 @@
+#### script used to make ciruclar phylogenetic plot #####
+
+# ── Libraries ─────────────────────────────────────────────────────────────────
+library(ggtree)
+library(ggplot2)
+library(ggnewscale)
+library(dplyr)
+library(ape)
+library(phangorn)
+
+# ── 1. Load and root tree ──────────────────────────────────────────────────────
+tree        <- read.tree("/Users/harryhocking/core_tree_gamma.newick")
+tree_rooted <- midpoint(tree)
+
+tree_rooted$edge.length <- tree_rooted$edge.length / max(tree_rooted$edge.length)
+tree_rooted$edge.length[tree_rooted$edge.length > 0.5] <- 0.5
+tree_rooted$root.edge   <- 0
+tree_rooted$tip.label   <- gsub("^0+", "", tree_rooted$tip.label)
+
+n_tips <- length(tree_rooted$tip.label)
+
+# ── 2. Extend all tips to equal radius ────────────────────────────────────────
+node_depths <- node.depth.edgelength(tree_rooted)
+max_depth   <- max(node_depths[1:n_tips])
+
+for (i in seq_along(tree_rooted$edge[, 2])) {
+  child <- tree_rooted$edge[i, 2]
+  if (child <= n_tips) {
+    deficit <- max_depth - node_depths[child]
+    tree_rooted$edge.length[i] <- tree_rooted$edge.length[i] + deficit
+  }
+}
+
+# ── 3. Parse MLST ──────────────────────────────────────────────────────────────
+mlst <- read.delim("/Users/harryhocking/mlst_summary_clean.csv",
+                   sep = "\t", header = TRUE) %>%
+  mutate(
+    FILE = basename(FILE),
+    FILE = gsub("\\.fasta$", "", FILE),
+    FILE = gsub("^0+", "", FILE),
+    ST   = ifelse(ST == "-" | STATUS == "NOVEL", "Novel", as.character(ST))
+  ) %>%
+  group_by(FILE) %>%
+  slice_max(order_by = SCORE, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# ── 4. Build tip metadata ─────────────────────────────────────────────────────
+st_counts     <- mlst %>% count(ST, name = "n_st")
+singleton_sts <- st_counts %>% filter(n_st == 1) %>% pull(ST)
+
+tip_data <- data.frame(sample_id = tree_rooted$tip.label) %>%
+  left_join(mlst %>% select(FILE, ST), by = c("sample_id" = "FILE")) %>%
+  mutate(
+    ST_plot = case_when(
+      is.na(ST)             ~ "Other",
+      ST %in% singleton_sts ~ "Other",
+      TRUE                  ~ ST
+    ),
+    MNG = as.numeric(sub("_.*", "", sample_id))
+  ) %>%
+  left_join(origin %>% mutate(MNG_ID = as.numeric(MNG_ID)) %>%
+              select(MNG_ID, Country),
+            by = c("MNG" = "MNG_ID")) %>%
+  mutate(Country = ifelse(is.na(Country), "Unknown", Country))
+
+st_freq   <- tip_data %>% filter(ST_plot != "Other") %>% count(ST_plot, name = "count")
+named_sts <- st_freq %>% pull(ST_plot) %>% sort()
+
+# ── 5. Country colours ────────────────────────────────────────────────────────
+countries       <- sort(unique(tip_data$Country))
+# 3 well-separated blues — dark navy, mid royal blue, light steel blue
+# Unknown gets grey — replace country names below if needed after checking unique(tip_data$Country)
+country_colours <- setNames(
+  c("#0D2B6E", "#2E86C1", "#A8D5F5", "white"),
+  c(sort(countries[countries != "Unknown"]), "Unknown")
+)
+
+# ── 6. ST colours ─────────────────────────────────────────────────────────────
+qual_colours <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#C85200", "#0072B2",
+  "#D55E00", "#CC79A7", "#3CB371", "#E41A1C", "#377EB8",
+  "#4DAF4A", "#984EA3", "#FF7F00", "#A65628", "#F781BF",
+  "#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854",
+  "#B3446C", "#E5C494", "#1B9E77", "#D95F02", "#7570B3",
+  "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666"
+)
+
+st_colours        <- setNames(rep_len(qual_colours, length(named_sts)), named_sts)
+st_colours["131"] <- "#1B7837"
+st_colours        <- c(st_colours, "Other" = "grey60")
+all_st_colours    <- c(st_colours, "0" = "grey40")
+
+# ── 7. groupOTU ───────────────────────────────────────────────────────────────
+st_groups <- tip_data %>%
+  filter(ST_plot != "Other", ST_plot != "Novel") %>%
+  split(.$ST_plot) %>%
+  lapply(function(x) x$sample_id)
+
+tree_grouped <- groupOTU(tree_rooted, st_groups, group_name = "ST_group")
+
+# ── 8. Fortify ────────────────────────────────────────────────────────────────
+p0      <- ggtree(tree_grouped, layout = "fan", open.angle = 15)
+tree_df <- p0$data
+tip_y   <- tree_df %>% filter(isTip) %>% select(label, y, angle)
+x_max   <- max(tree_df$x, na.rm = TRUE)
+
+# ── 9. Country ring data — join y positions from fortified tree ───────────────
+ring_gap   <- x_max * 0.02   # gap between rings
+ring_width <- x_max * 0.06   # thickness of each ring
+
+x_country  <- x_max     + ring_gap                + ring_width / 2
+x_amr      <- x_country + ring_width / 2 + ring_gap  + ring_width / 2
+x_snippy   <- x_amr     + ring_width / 2 + ring_gap  + ring_width / 2
+x_trunc    <- x_snippy  + ring_width / 2 + ring_gap  + ring_width / 2
+
+# Country ring
+country_ring <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  mutate(x_ring = x_country)
+
+# Strip leading zeros into temporary copies — does not overwrite original dataframes
+amr_nfsA_circ    <- amr_nfsA    %>% mutate(sample_id = gsub("^0+", "", sample_id))
+amr_nfsB_circ    <- amr_nfsB    %>% mutate(sample_id = gsub("^0+", "", sample_id))
+
+# AMR rings
+amr_ring <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  left_join(amr_nfsA_circ, by = "sample_id") %>%
+  left_join(amr_nfsB_circ, by = "sample_id") %>%
+  mutate(
+    amr_nfsA = ifelse(!is.na(amr_nfsA) & amr_nfsA == "Present", "Present", NA_character_),
+    amr_nfsB = ifelse(!is.na(amr_nfsB) & amr_nfsB == "Present", "Present", NA_character_)
+  )
+
+# Snippy ring
+# Rename column trunc_nfsA in snippy_nfsA_circ to snippy_nfsA so case_when can find it
+# Rename column trunc_nfsB in snippy_nfsB_circ to snippy_nfsB so case_when can find it
+snippy_nfsA_circ <- snippy_nfsA %>%
+  mutate(sample_id = gsub("^0+", "", sample_id)) %>%
+  rename(snippy_nfsA = trunc_nfsA)
+snippy_nfsB_circ <- snippy_nfsB %>%
+  mutate(sample_id = gsub("^0+", "", sample_id)) %>%
+  rename(snippy_nfsB = trunc_nfsB)
+
+# ── DEBUG: verify column rename and tip matching ──────────────────────────────
+cat("DEBUG snippy_nfsA_circ structure:\n"); str(snippy_nfsA_circ)
+cat("DEBUG snippy_nfsB_circ structure:\n"); str(snippy_nfsB_circ)
+cat("DEBUG snippy_nfsA_circ Truncated count:", sum(snippy_nfsA_circ$snippy_nfsA == "Truncated", na.rm = TRUE), "\n")
+cat("DEBUG snippy_nfsB_circ Truncated count:", sum(snippy_nfsB_circ$snippy_nfsB == "Truncated", na.rm = TRUE), "\n")
+cat("DEBUG snippy_nfsA_circ unmatched tip IDs:",
+    sum(!snippy_nfsA_circ$sample_id[!is.na(snippy_nfsA_circ$snippy_nfsA)] %in% tree_rooted$tip.label), "\n")
+cat("DEBUG snippy_nfsB_circ unmatched tip IDs:",
+    sum(!snippy_nfsB_circ$sample_id[!is.na(snippy_nfsB_circ$snippy_nfsB)] %in% tree_rooted$tip.label), "\n")
+# ─────────────────────────────────────────────────────────────────────────────
+
+snippy_ring <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  left_join(snippy_nfsA_circ, by = "sample_id") %>%
+  left_join(snippy_nfsB_circ, by = "sample_id") %>%
+  mutate(
+    has_nfsA = !is.na(snippy_nfsA) & snippy_nfsA == "Truncated",
+    has_nfsB = !is.na(snippy_nfsB) & snippy_nfsB == "Truncated",
+    snippy_gene = case_when(
+      has_nfsA & has_nfsB ~ "Both",
+      has_nfsA             ~ "nfsA",
+      has_nfsB             ~ "nfsB",
+      TRUE                 ~ "Absent"
+    )
+  )
+
+# ── DEBUG: verify snippy_ring after construction ──────────────────────────────
+cat("DEBUG snippy_ring rows:", nrow(snippy_ring), "\n")
+cat("DEBUG snippy_gene counts:\n"); print(table(snippy_ring$snippy_gene, useNA = "always"))
+cat("DEBUG snippy_ring y alignment:\n")
+snippy_ring %>%
+  left_join(tip_y %>% select(label, y) %>% rename(y_check = y), by = c("sample_id" = "label")) %>%
+  mutate(aligned = y == y_check) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE)) %>%
+  print()
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Truncation ring
+nfsA_trunc_circ <- nfsA_trunc %>% mutate(sample_id = gsub("^0+", "", sample_id))
+nfsB_trunc_circ <- nfsB_trunc %>% mutate(sample_id = gsub("^0+", "", sample_id))
+
+trunc_ring <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  left_join(nfsA_trunc_circ, by = "sample_id") %>%
+  left_join(nfsB_trunc_circ, by = "sample_id") %>%
+  mutate(
+    has_nfsA = !is.na(trunc_nfsA) & trunc_nfsA == "Truncated",
+    has_nfsB = !is.na(trunc_nfsB) & trunc_nfsB == "Truncated",
+    trunc_gene = case_when(
+      has_nfsA & has_nfsB ~ "Both",
+      has_nfsA             ~ "nfsA",
+      has_nfsB             ~ "nfsB",
+      TRUE                 ~ "Absent"
+    )
+  )
+
+# ── 10. Metadata match diagnostics ─────────────────────────────────────
+tip_labels <- tree_rooted$tip.label
+
+check_match <- function(df, id_col, name) {
+  unmatched <- df[[id_col]][!df[[id_col]] %in% tip_labels]
+  if (length(unmatched) == 0) {
+    message(sprintf("✓ %s: all %d IDs matched to tree tips", name, nrow(df)))
+  } else {
+    warning(sprintf("⚠ %s: %d/%d IDs did NOT match tree tips:
+  %s",
+                    name, length(unmatched), nrow(df),
+                    paste(unmatched, collapse = "
+  ")))
+  }
+}
+
+check_match(mlst,          "FILE",      "MLST")
+check_match(amr_nfsA_circ,    "sample_id", "AMRFinder nfsA")
+check_match(amr_nfsB_circ,    "sample_id", "AMRFinder nfsB")
+check_match(snippy_nfsA_circ, "sample_id", "Snippy nfsA")
+check_match(snippy_nfsB_circ, "sample_id", "Snippy nfsB")
+check_match(nfsA_trunc_circ,  "sample_id", "Truncation nfsA")
+check_match(nfsB_trunc_circ,  "sample_id", "Truncation nfsB")
+
+# Check country join
+n_tips_no_country <- sum(is.na(tip_data$Country) | tip_data$Country == "Unknown")
+message(sprintf("Country: %d/%d tips have Unknown/missing country",
+                n_tips_no_country, length(tip_labels)))
+
+# ── y-coordinate alignment diagnostics ────────────────────────────────────────
+cat("\nChecking y-coordinate alignment for all rings:\n")
+
+cat("Country ring:\n")
+country_ring %>%
+  left_join(tip_y %>% select(label, y) %>% rename(y_check = y), by = c("sample_id" = "label")) %>%
+  mutate(aligned = y == y_check) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE)) %>%
+  print()
+
+cat("AMR ring:\n")
+amr_ring %>%
+  left_join(tip_y %>% select(label, y) %>% rename(y_check = y), by = c("sample_id" = "label")) %>%
+  mutate(aligned = y == y_check) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE)) %>%
+  print()
+
+cat("Snippy ring:\n")
+snippy_ring %>%
+  left_join(tip_y %>% select(label, y) %>% rename(y_check = y), by = c("sample_id" = "label")) %>%
+  mutate(aligned = y == y_check) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE)) %>%
+  print()
+
+cat("Truncation ring:\n")
+trunc_ring %>%
+  left_join(tip_y %>% select(label, y) %>% rename(y_check = y), by = c("sample_id" = "label")) %>%
+  mutate(aligned = y == y_check) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE)) %>%
+  print()
+
+# ── 11. ST label positions ────────────────────────────────────────────────────
+min_n_label <- 4
+
+st_label_data <- tip_data %>%
+  filter(ST_plot != "Other", ST_plot != "Novel") %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  group_by(ST_plot) %>%
+  summarise(
+    n       = n(),
+    y_mid   = (min(y) + max(y)) / 2,
+    ang_mid = mean(angle),
+    .groups = "drop"
+  ) %>%
+  filter(n >= min_n_label) %>%
+  mutate(
+    st_label = paste0("ST", ST_plot),
+    colour   = st_colours[ST_plot],
+    node = sapply(ST_plot, function(st) {
+      tips_st <- tip_data %>% filter(ST_plot == st) %>% pull(sample_id)
+      if (length(tips_st) == 1) which(tree_rooted$tip.label == tips_st)
+      else getMRCA(tree_rooted, tips_st)
+    })
+  ) %>%
+  left_join(tree_df %>% select(node, x, y) %>%
+              rename(node_x = x, node_y = y), by = "node") %>%
+  mutate(
+    ang_rad    = ang_mid * pi / 180,
+    nudge_amt  = 0.04,
+    x_label    = node_x * 0.82 + nudge_amt * cos(ang_rad),
+    y_label    = node_y        + nudge_amt * sin(ang_rad),
+    angle_text = ifelse(ang_mid > 90 & ang_mid < 270,
+                        ang_mid + 180, ang_mid)
+  )
+
+# ── 11. Build plot ────────────────────────────────────────────────────────────
+# Build base tree first, then extract its coord and re-apply after new_scale
+p <- suppressWarnings(
+  ggtree(tree_grouped,
+         layout     = "fan",
+         open.angle = 15,
+         aes(colour = ST_group),
+         linewidth  = 0.4) +
+
+  scale_colour_manual(
+    values   = all_st_colours,
+    na.value = "grey40",
+    guide    = "none"
+  ) +
+
+  geom_tippoint(aes(colour = ST_group), size = 1.2, show.legend = FALSE) +
+
+  new_scale_fill() +
+
+  # geom_tile with explicit data= and explicit x/y columns
+  geom_tile(
+    data    = country_ring,
+    aes(x = x_ring, y = y, fill = Country),
+    width   = ring_width,
+    height  = 1,
+    colour  = NA,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_manual(
+    name     = "Country",
+    values   = country_colours,
+    na.value = "white"
+  ) +
+
+  # ── AMR ring (nfsA + nfsB combined) ──
+  new_scale_fill() +
+  geom_tile(
+    data    = amr_ring %>%
+                mutate(amr_gene = case_when(
+                  !is.na(amr_nfsA) ~ "nfsA",
+                  !is.na(amr_nfsB) ~ "nfsB",
+                  TRUE             ~ "Absent"
+                )),
+    aes(x = x_amr, y = y, fill = amr_gene),
+    width   = ring_width, height = 1,
+    colour  = NA, inherit.aes = FALSE
+  ) +
+  scale_fill_manual(
+    name   = "AMRFinder",
+    values = c("nfsA" = "#6A0DAD", "nfsB" = "#B44FD4", "Absent" = "grey90"),
+    breaks = c("nfsA", "nfsB")
+  ) +
+
+  # ── Snippy ring (nfsA + nfsB + Both combined) ──
+  new_scale_fill() +
+  geom_tile(
+    data    = snippy_ring,
+    aes(x = x_snippy, y = y, fill = snippy_gene),
+    width   = ring_width, height = 1,
+    colour  = NA, inherit.aes = FALSE
+  ) +
+  scale_fill_manual(
+    name   = "Variant Calling",
+    values = c("nfsA" = "#FFD166", "nfsB" = "#EF8C2A", "Both" = "#C1121F", "Absent" = "grey90"),
+    breaks = c("nfsA", "nfsB", "Both")
+  ) +
+
+  # ── Truncation ring (nfsA + nfsB + Both combined) ──
+  new_scale_fill() +
+  geom_tile(
+    data    = trunc_ring,
+    aes(x = x_trunc, y = y, fill = trunc_gene),
+    width   = ring_width, height = 1,
+    colour  = NA, inherit.aes = FALSE
+  ) +
+  scale_fill_manual(
+    name   = "Truncation",
+    values = c("nfsA" = "#95D5B2", "nfsB" = "#52B788", "Both" = "#1B4332", "Absent" = "grey90"),
+    breaks = c("nfsA", "nfsB", "Both")
+  ) +
+
+  geom_label(
+    data        = st_label_data,
+    aes(x = x_label, y = y_label, label = st_label,
+        colour = ST_plot, angle = angle_text),
+    size        = 2.8, fontface = "bold",
+    hjust = 0.5, vjust = 0.5,
+    label.size  = 0, fill = "white", alpha = 0.75,
+    show.legend = FALSE, inherit.aes = FALSE
+  ) +
+
+  # Re-apply polar coord explicitly to prevent it being dropped
+  coord_polar(theta = "y", start = -(90 + 15/2) * pi / 180, direction = -1) +
+
+  theme_tree() +
+  theme(
+    legend.position = "right",
+    legend.text     = element_text(size = 11),
+    legend.title    = element_text(size = 12, face = "bold"),
+    legend.key.size = unit(0.7, "cm"),
+    plot.margin     = unit(c(1, 1, 1, 1), "cm")
+  )
+)
+
+# ── 12. Save ──────────────────────────────────────────────────────────────────
+ggsave("/Users/harryhocking/circular_tree_country.pdf", p, width = 22, height = 22)
+ggsave("/Users/harryhocking/circular_tree_country.png", p, width = 22, height = 22, dpi = 600)
+message("Done!")
