@@ -1,0 +1,692 @@
+####### extract nfsA sequences #######
+#!/usr/bin/env python3
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=extract_nfsA
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=short
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --account=cropdiv-acc
+#SBATCH --output=/mnt/shared/scratch/hhocking/logs/extract_nfsA_%j.out
+#SBATCH --error=/mnt/shared/scratch/hhocking/logs/extract_nfsA_%j.err
+"""
+extract_nfsA_sequences.py
+
+Reads a Panaroo gene_presence_absence.csv, finds all nfsA-related gene clusters,
+extracts locus tags per isolate, and pulls protein sequences from per-isolate FAA files.
+
+Submit to SLURM:
+  sbatch extract_nfsA_sequences.py \
+      --presence_absence /mnt/shared/scratch/hhocking/panaroo_resultsL_RO/gene_presence_absence.csv \
+      --faa_dir /mnt/shared/scratch/hhocking/bakta_resultsL \
+      --output_dir /mnt/shared/scratch/hhocking/nfsA_output
+
+Run interactively:
+  python3 extract_nfsA_sequences.py \
+      --presence_absence /mnt/shared/scratch/hhocking/panaroo_resultsL_RO/gene_presence_absence.csv \
+      --faa_dir /mnt/shared/scratch/hhocking/bakta_resultsL \
+      --output_dir /mnt/shared/scratch/hhocking/nfsA_output
+
+Arguments:
+  --presence_absence  Path to Panaroo gene_presence_absence.csv  [required]
+  --faa_dir           Directory containing per-isolate FAA files  [required]
+  --faa_ext           FAA file extension (default: .faa)
+  --gene_name         Gene name to search for (default: nfsA)
+  --output_dir        Output directory [required]
+
+Outputs:
+  <gene>_all_sequences.faa       All extracted sequences
+  <gene>_locus_tag_summary.tsv   Per-isolate locus tag and length summary
+  <gene>_missing_isolates.txt    Isolates absent from all matching clusters
+  <gene>_sequence_not_found.txt  Locus tags not found in FAA files
+"""
+
+import subprocess
+import sys
+import os
+
+# ==============================================================================
+# CONDA ENVIRONMENT ACTIVATION
+# Relaunch this script inside the correct conda environment if not already in it.
+# ==============================================================================
+CONDA_ENV = "/mnt/apps/users/hhocking/conda/envs/python_3.14.3"
+CONDA_ACTIVATE = "/mnt/apps/users/hhocking/conda/bin/activate"
+
+if sys.prefix != CONDA_ENV:
+    # Re-execute this script within the conda environment
+    cmd = f"source {CONDA_ACTIVATE} {CONDA_ENV} && python3 {' '.join(sys.argv)}"
+    result = subprocess.run(cmd, shell=True, executable="/bin/bash")
+    sys.exit(result.returncode)
+
+# ==============================================================================
+
+import argparse
+import csv
+from pathlib import Path
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--presence_absence", default="/mnt/shared/scratch/hhocking/panaroo_resultsL_RO/gene_presence_absence.csv",
+                        help="Path to gene_presence_absence.csv")
+    parser.add_argument("--faa_dir", default="/mnt/shared/scratch/hhocking/bakta_resultsL",
+                        help="Directory containing per-isolate FAA files")
+    parser.add_argument("--faa_ext", default=".faa",
+                        help="FAA file extension (default: .faa)")
+    parser.add_argument("--gene_name", default="nfsA",
+                        help="Gene name to search for (default: nfsA)")
+    parser.add_argument("--output_dir", default="/mnt/shared/scratch/hhocking/nfsA_output",
+                        help="Output directory (will be created if absent)")
+    return parser.parse_args()
+
+
+def read_presence_absence(filepath, gene_name):
+    """
+    Parse gene_presence_absence.csv.
+    Returns:
+        isolate_names : list of isolate column headers
+        nfsa_rows     : list of dicts with cluster info and per-isolate locus tags
+    """
+    fixed_fields = {
+        "Gene", "Non-unique Gene name", "Annotation", "No. isolates",
+        "No. sequences", "Avg sequences per isolate", "Genome Fragment",
+        "Order within Fragment", "Accessory Fragment",
+        "Accessory Order with Fragment", "QC",
+        "Min group size nuc", "Max group size nuc", "Avg group size nuc"
+    }
+
+    nfsa_rows = []
+    isolate_names = []
+
+    with open(filepath, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames
+
+        if fieldnames is None:
+            sys.exit("ERROR: Could not read column headers from presence/absence file.")
+
+        isolate_names = [f for f in fieldnames if f not in fixed_fields]
+
+        if not isolate_names:
+            sys.exit("ERROR: No isolate columns detected. Check your CSV format.")
+
+        print(f"  Detected {len(isolate_names)} isolates.")
+
+        gene_name_lower = gene_name.lower()
+        rows_found = 0
+
+        for row in reader:
+            gene_col = row.get("Gene", "")
+            annotation_col = row.get("Annotation", "")
+
+            if (gene_name_lower in gene_col.lower() or
+                    gene_name_lower in annotation_col.lower()):
+
+                rows_found += 1
+                cluster_label = gene_col if gene_col else annotation_col
+
+                isolate_tags = {}
+                for isolate in isolate_names:
+                    cell = row.get(isolate, "").strip()
+                    if cell and cell not in ("", "nan"):
+                        tags = [t.strip() for t in cell.replace(";", "\t").split("\t") if t.strip()]
+                        if tags:
+                            isolate_tags[isolate] = tags
+
+                nfsa_rows.append({
+                    "cluster": cluster_label,
+                    "annotation": annotation_col,
+                    "isolate_tags": isolate_tags
+                })
+
+        print(f"  Found {rows_found} cluster row(s) matching '{gene_name}'.")
+
+    return isolate_names, nfsa_rows
+
+
+def parse_faa(faa_path):
+    """
+    Parse a FASTA protein file.
+    Returns dict: locus_tag -> sequence string.
+    Locus tag is the first whitespace-delimited token of the header line.
+    """
+    sequences = {}
+    current_tag = None
+    current_seq = []
+
+    with open(faa_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip()
+            if line.startswith(">"):
+                if current_tag:
+                    sequences[current_tag] = "".join(current_seq)
+                current_tag = line[1:].split()[0]
+                current_seq = []
+            else:
+                current_seq.append(line)
+
+    if current_tag:
+        sequences[current_tag] = "".join(current_seq)
+
+    return sequences
+
+
+def index_faa_files(faa_dir, faa_ext, isolate_names):
+    """
+    For each isolate, locate its FAA file and index locus_tag -> sequence.
+    Handles nested Bakta structure: <faa_dir>/<isolate>/<isolate>.faa
+    Also falls back to flat structure: <faa_dir>/<isolate>.faa
+    Returns dict: isolate -> {locus_tag: sequence}
+    """
+    faa_dir = Path(faa_dir)
+    faa_index = {}
+    missing_files = []
+
+    print(f"\nIndexing FAA files from: {faa_dir}")
+
+    for isolate in isolate_names:
+        # Primary: nested Bakta structure — <faa_dir>/<isolate>/<isolate>.faa
+        faa_path = faa_dir / isolate / f"{isolate}{faa_ext}"
+
+        if not faa_path.exists():
+            # Fallback 1: any .faa file inside the isolate subdirectory
+            subdir = faa_dir / isolate
+            matches = list(subdir.glob(f"*{faa_ext}")) if subdir.is_dir() else []
+            if matches:
+                faa_path = matches[0]
+            else:
+                # Fallback 2: flat structure — <faa_dir>/<isolate>.faa
+                flat_path = faa_dir / f"{isolate}{faa_ext}"
+                if flat_path.exists():
+                    faa_path = flat_path
+                else:
+                    missing_files.append(isolate)
+                    faa_index[isolate] = {}
+                    continue
+
+        faa_index[isolate] = parse_faa(faa_path)
+
+    if missing_files:
+        print(f"  WARNING: FAA files not found for {len(missing_files)} isolate(s).")
+        print(f"  First few missing: {missing_files[:5]}")
+
+    print(f"  Indexed FAA files for {len(isolate_names) - len(missing_files)} isolates.")
+    return faa_index
+
+
+
+def extract_sequences(isolate_names, nfsa_rows, faa_index, gene_name, output_dir):
+    """
+    Extract sequences for all locus tags across all nfsA cluster rows.
+    Writes four output files and returns summary data.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure logs directory exists for SLURM output
+    Path("/mnt/shared/scratch/hhocking/logs").mkdir(parents=True, exist_ok=True)
+
+    all_seq_path   = output_dir / f"{gene_name}_all_sequences.faa"
+    summary_path   = output_dir / f"{gene_name}_locus_tag_summary.tsv"
+    missing_path   = output_dir / f"{gene_name}_missing_isolates.txt"
+    not_found_path = output_dir / f"{gene_name}_sequence_not_found.txt"
+
+    isolate_summary = {iso: [] for iso in isolate_names}
+    not_found = []
+
+    with open(all_seq_path, "w") as faa_out:
+        for row in nfsa_rows:
+            cluster = row["cluster"]
+            annotation = row["annotation"]
+
+            for isolate, tags in row["isolate_tags"].items():
+                iso_faa = faa_index.get(isolate, {})
+                for tag in tags:
+                    seq = iso_faa.get(tag)
+                    if seq:
+                        faa_out.write(f">{tag} isolate={isolate} cluster={cluster}\n{seq}\n")
+                        isolate_summary[isolate].append({
+                            "cluster": cluster,
+                            "annotation": annotation,
+                            "locus_tag": tag,
+                            "seq_len": len(seq),
+                            "found": True
+                        })
+                    else:
+                        not_found.append((isolate, cluster, tag))
+                        isolate_summary[isolate].append({
+                            "cluster": cluster,
+                            "annotation": annotation,
+                            "locus_tag": tag,
+                            "seq_len": "NOT_FOUND",
+                            "found": False
+                        })
+
+    # Summary TSV
+    with open(summary_path, "w") as tsv_out:
+        tsv_out.write("Isolate\tCluster\tAnnotation\tLocus_Tag\tSeq_Length_aa\tSequence_Found\n")
+        for isolate in isolate_names:
+            entries = isolate_summary[isolate]
+            if entries:
+                for e in entries:
+                    tsv_out.write(
+                        f"{isolate}\t{e['cluster']}\t{e['annotation']}\t"
+                        f"{e['locus_tag']}\t{e['seq_len']}\t{e['found']}\n"
+                    )
+            else:
+                tsv_out.write(f"{isolate}\tABSENT\t\t\t\tFalse\n")
+
+    # Missing isolates
+    missing_isolates = [iso for iso in isolate_names if not isolate_summary[iso]]
+    with open(missing_path, "w") as f:
+        f.write(f"# Isolates with no {gene_name} locus tag in any cluster row\n")
+        f.write(f"# Total: {len(missing_isolates)}\n")
+        for iso in missing_isolates:
+            f.write(f"{iso}\n")
+
+    # Locus tags not found in FAA files
+    with open(not_found_path, "w") as f:
+        f.write("# Locus tags in presence/absence CSV but absent from FAA files\n")
+        f.write("Isolate\tCluster\tLocus_Tag\n")
+        for iso, cluster, tag in not_found:
+            f.write(f"{iso}\t{cluster}\t{tag}\n")
+
+    return isolate_summary, missing_isolates, not_found
+
+
+def print_summary(isolate_names, isolate_summary, missing_isolates, not_found, output_dir, gene_name):
+    total    = len(isolate_names)
+    present  = sum(1 for iso in isolate_names if isolate_summary[iso])
+    absent   = len(missing_isolates)
+    dual_tag = sum(1 for iso in isolate_names if len(isolate_summary[iso]) > 1)
+
+    print(f"\n{'='*55}")
+    print(f"  SUMMARY FOR GENE: {gene_name.upper()}")
+    print(f"{'='*55}")
+    print(f"  Total isolates                  : {total}")
+    print(f"  Isolates with {gene_name} locus tag     : {present}")
+    print(f"  Isolates with NO locus tag      : {absent}")
+    print(f"  Isolates with >1 locus tag      : {dual_tag}  (potential nfsA+objC contamination)")
+    print(f"  Locus tags not found in FAA     : {len(not_found)}")
+    print(f"\n  Output files written to: {output_dir}")
+    print(f"  - {gene_name}_all_sequences.faa")
+    print(f"  - {gene_name}_locus_tag_summary.tsv")
+    print(f"  - {gene_name}_missing_isolates.txt")
+    print(f"  - {gene_name}_sequence_not_found.txt")
+    print(f"{'='*55}\n")
+
+
+def main():
+    args = parse_args()
+
+    print(f"\nReading presence/absence file: {args.presence_absence}")
+    isolate_names, nfsa_rows = read_presence_absence(args.presence_absence, args.gene_name)
+
+    if not nfsa_rows:
+        sys.exit(f"ERROR: No rows matching '{args.gene_name}' found. Check gene name and CSV.")
+
+    faa_index = index_faa_files(args.faa_dir, args.faa_ext, isolate_names)
+
+    print("\nExtracting sequences...")
+    isolate_summary, missing_isolates, not_found = extract_sequences(
+        isolate_names, nfsa_rows, faa_index, args.gene_name, args.output_dir
+    )
+
+    print_summary(isolate_names, isolate_summary, missing_isolates, not_found,
+                  args.output_dir, args.gene_name)
+
+
+if __name__ == "__main__":
+    main()
+
+####### extract nfsB sequences #######
+
+#!/usr/bin/env python3
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=extract_nfsB
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=short
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --account=cropdiv-acc
+#SBATCH --output=/mnt/shared/scratch/hhocking/logs/extract_nfsB_%j.out
+#SBATCH --error=/mnt/shared/scratch/hhocking/logs/extract_nfsB_%j.err
+"""
+extract_nfsB_sequences.py
+
+Reads a Panaroo gene_presence_absence.csv, finds all nfsB-related gene clusters,
+extracts locus tags per isolate, and pulls protein sequences from per-isolate FAA files.
+
+Submit to SLURM:
+  sbatch extract_nfsB_sequences.py \
+      --presence_absence /mnt/shared/scratch/hhocking/panaroo_resultsL_RO/gene_presence_absence.csv \
+      --faa_dir /mnt/shared/scratch/hhocking/bakta_resultsL \
+      --output_dir /mnt/shared/scratch/hhocking/nfsB_output
+
+Run interactively:
+  python3 extract_nfsB_sequences.py \
+      --presence_absence /mnt/shared/scratch/hhocking/panaroo_resultsL_RO/gene_presence_absence.csv \
+      --faa_dir /mnt/shared/scratch/hhocking/bakta_resultsL \
+      --output_dir /mnt/shared/scratch/hhocking/nfsB_output
+
+Arguments:
+  --presence_absence  Path to Panaroo gene_presence_absence.csv  [required]
+  --faa_dir           Directory containing per-isolate FAA files  [required]
+  --faa_ext           FAA file extension (default: .faa)
+  --gene_name         Gene name to search for (default: nfsA)
+  --output_dir        Output directory [required]
+
+Outputs:
+  <gene>_all_sequences.faa       All extracted sequences
+  <gene>_locus_tag_summary.tsv   Per-isolate locus tag and length summary
+  <gene>_missing_isolates.txt    Isolates absent from all matching clusters
+  <gene>_sequence_not_found.txt  Locus tags not found in FAA files
+"""
+
+import subprocess
+import sys
+import os
+
+# ==============================================================================
+# CONDA ENVIRONMENT ACTIVATION
+# Relaunch this script inside the correct conda environment if not already in it.
+# ==============================================================================
+CONDA_ENV = "/mnt/apps/users/hhocking/conda/envs/python_3.14.3"
+CONDA_ACTIVATE = "/mnt/apps/users/hhocking/conda/bin/activate"
+
+if sys.prefix != CONDA_ENV:
+    # Re-execute this script within the conda environment
+    cmd = f"source {CONDA_ACTIVATE} {CONDA_ENV} && python3 {' '.join(sys.argv)}"
+    result = subprocess.run(cmd, shell=True, executable="/bin/bash")
+    sys.exit(result.returncode)
+
+# ==============================================================================
+
+import argparse
+import csv
+from pathlib import Path
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--presence_absence", default="/mnt/shared/scratch/hhocking/panaroo_resultsL_RO/gene_presence_absence.csv",
+                        help="Path to gene_presence_absence.csv")
+    parser.add_argument("--faa_dir", default="/mnt/shared/scratch/hhocking/bakta_resultsL",
+                        help="Directory containing per-isolate FAA files")
+    parser.add_argument("--faa_ext", default=".faa",
+                        help="FAA file extension (default: .faa)")
+    parser.add_argument("--gene_name", default="nfsB",
+                        help="Gene name to search for (default: nfsA)")
+    parser.add_argument("--output_dir", default="/mnt/shared/scratch/hhocking/nfsB_output",
+                        help="Output directory (will be created if absent)")
+    return parser.parse_args()
+
+
+def read_presence_absence(filepath, gene_name):
+    """
+    Parse gene_presence_absence.csv.
+    Returns:
+        isolate_names : list of isolate column headers
+        nfsa_rows     : list of dicts with cluster info and per-isolate locus tags
+    """
+    fixed_fields = {
+        "Gene", "Non-unique Gene name", "Annotation", "No. isolates",
+        "No. sequences", "Avg sequences per isolate", "Genome Fragment",
+        "Order within Fragment", "Accessory Fragment",
+        "Accessory Order with Fragment", "QC",
+        "Min group size nuc", "Max group size nuc", "Avg group size nuc"
+    }
+
+    nfsa_rows = []
+    isolate_names = []
+
+    with open(filepath, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames
+
+        if fieldnames is None:
+            sys.exit("ERROR: Could not read column headers from presence/absence file.")
+
+        isolate_names = [f for f in fieldnames if f not in fixed_fields]
+
+        if not isolate_names:
+            sys.exit("ERROR: No isolate columns detected. Check your CSV format.")
+
+        print(f"  Detected {len(isolate_names)} isolates.")
+
+        gene_name_lower = gene_name.lower()
+        rows_found = 0
+
+        for row in reader:
+            gene_col = row.get("Gene", "")
+            annotation_col = row.get("Annotation", "")
+
+            if (gene_name_lower in gene_col.lower() or
+                    gene_name_lower in annotation_col.lower()):
+
+                rows_found += 1
+                cluster_label = gene_col if gene_col else annotation_col
+
+                isolate_tags = {}
+                for isolate in isolate_names:
+                    cell = row.get(isolate, "").strip()
+                    if cell and cell not in ("", "nan"):
+                        tags = [t.strip() for t in cell.replace(";", "\t").split("\t") if t.strip()]
+                        if tags:
+                            isolate_tags[isolate] = tags
+
+                nfsa_rows.append({
+                    "cluster": cluster_label,
+                    "annotation": annotation_col,
+                    "isolate_tags": isolate_tags
+                })
+
+        print(f"  Found {rows_found} cluster row(s) matching '{gene_name}'.")
+
+    return isolate_names, nfsa_rows
+
+
+def parse_faa(faa_path):
+    """
+    Parse a FASTA protein file.
+    Returns dict: locus_tag -> sequence string.
+    Locus tag is the first whitespace-delimited token of the header line.
+    """
+    sequences = {}
+    current_tag = None
+    current_seq = []
+
+    with open(faa_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip()
+            if line.startswith(">"):
+                if current_tag:
+                    sequences[current_tag] = "".join(current_seq)
+                current_tag = line[1:].split()[0]
+                current_seq = []
+            else:
+                current_seq.append(line)
+
+    if current_tag:
+        sequences[current_tag] = "".join(current_seq)
+
+    return sequences
+
+
+def index_faa_files(faa_dir, faa_ext, isolate_names):
+    """
+    For each isolate, locate its FAA file and index locus_tag -> sequence.
+    Handles nested Bakta structure: <faa_dir>/<isolate>/<isolate>.faa
+    Also falls back to flat structure: <faa_dir>/<isolate>.faa
+    Returns dict: isolate -> {locus_tag: sequence}
+    """
+    faa_dir = Path(faa_dir)
+    faa_index = {}
+    missing_files = []
+
+    print(f"\nIndexing FAA files from: {faa_dir}")
+
+    for isolate in isolate_names:
+        # Primary: nested Bakta structure — <faa_dir>/<isolate>/<isolate>.faa
+        faa_path = faa_dir / isolate / f"{isolate}{faa_ext}"
+
+        if not faa_path.exists():
+            # Fallback 1: any .faa file inside the isolate subdirectory
+            subdir = faa_dir / isolate
+            matches = list(subdir.glob(f"*{faa_ext}")) if subdir.is_dir() else []
+            if matches:
+                faa_path = matches[0]
+            else:
+                # Fallback 2: flat structure — <faa_dir>/<isolate>.faa
+                flat_path = faa_dir / f"{isolate}{faa_ext}"
+                if flat_path.exists():
+                    faa_path = flat_path
+                else:
+                    missing_files.append(isolate)
+                    faa_index[isolate] = {}
+                    continue
+
+        faa_index[isolate] = parse_faa(faa_path)
+
+    if missing_files:
+        print(f"  WARNING: FAA files not found for {len(missing_files)} isolate(s).")
+        print(f"  First few missing: {missing_files[:5]}")
+
+    print(f"  Indexed FAA files for {len(isolate_names) - len(missing_files)} isolates.")
+    return faa_index
+
+
+
+def extract_sequences(isolate_names, nfsa_rows, faa_index, gene_name, output_dir):
+    """
+    Extract sequences for all locus tags across all nfsA cluster rows.
+    Writes four output files and returns summary data.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure logs directory exists for SLURM output
+    Path("/mnt/shared/scratch/hhocking/logs").mkdir(parents=True, exist_ok=True)
+
+    all_seq_path   = output_dir / f"{gene_name}_all_sequences.faa"
+    summary_path   = output_dir / f"{gene_name}_locus_tag_summary.tsv"
+    missing_path   = output_dir / f"{gene_name}_missing_isolates.txt"
+    not_found_path = output_dir / f"{gene_name}_sequence_not_found.txt"
+
+    isolate_summary = {iso: [] for iso in isolate_names}
+    not_found = []
+
+    with open(all_seq_path, "w") as faa_out:
+        for row in nfsa_rows:
+            cluster = row["cluster"]
+            annotation = row["annotation"]
+
+            for isolate, tags in row["isolate_tags"].items():
+                iso_faa = faa_index.get(isolate, {})
+                for tag in tags:
+                    seq = iso_faa.get(tag)
+                    if seq:
+                        faa_out.write(f">{tag}|{isolate}|{cluster}\n{seq}\n")
+                        isolate_summary[isolate].append({
+                            "cluster": cluster,
+                            "annotation": annotation,
+                            "locus_tag": tag,
+                            "seq_len": len(seq),
+                            "found": True
+                        })
+                    else:
+                        not_found.append((isolate, cluster, tag))
+                        isolate_summary[isolate].append({
+                            "cluster": cluster,
+                            "annotation": annotation,
+                            "locus_tag": tag,
+                            "seq_len": "NOT_FOUND",
+                            "found": False
+                        })
+
+    # Summary TSV
+    with open(summary_path, "w") as tsv_out:
+        tsv_out.write("Isolate\tCluster\tAnnotation\tLocus_Tag\tSeq_Length_aa\tSequence_Found\n")
+        for isolate in isolate_names:
+            entries = isolate_summary[isolate]
+            if entries:
+                for e in entries:
+                    tsv_out.write(
+                        f"{isolate}\t{e['cluster']}\t{e['annotation']}\t"
+                        f"{e['locus_tag']}\t{e['seq_len']}\t{e['found']}\n"
+                    )
+            else:
+                tsv_out.write(f"{isolate}\tABSENT\t\t\t\tFalse\n")
+
+    # Missing isolates
+    missing_isolates = [iso for iso in isolate_names if not isolate_summary[iso]]
+    with open(missing_path, "w") as f:
+        f.write(f"# Isolates with no {gene_name} locus tag in any cluster row\n")
+        f.write(f"# Total: {len(missing_isolates)}\n")
+        for iso in missing_isolates:
+            f.write(f"{iso}\n")
+
+    # Locus tags not found in FAA files
+    with open(not_found_path, "w") as f:
+        f.write("# Locus tags in presence/absence CSV but absent from FAA files\n")
+        f.write("Isolate\tCluster\tLocus_Tag\n")
+        for iso, cluster, tag in not_found:
+            f.write(f"{iso}\t{cluster}\t{tag}\n")
+
+    return isolate_summary, missing_isolates, not_found
+
+
+def print_summary(isolate_names, isolate_summary, missing_isolates, not_found, output_dir, gene_name):
+    total    = len(isolate_names)
+    present  = sum(1 for iso in isolate_names if isolate_summary[iso])
+    absent   = len(missing_isolates)
+    dual_tag = sum(1 for iso in isolate_names if len(isolate_summary[iso]) > 1)
+
+    print(f"\n{'='*55}")
+    print(f"  SUMMARY FOR GENE: {gene_name.upper()}")
+    print(f"{'='*55}")
+    print(f"  Total isolates                  : {total}")
+    print(f"  Isolates with {gene_name} locus tag     : {present}")
+    print(f"  Isolates with NO locus tag      : {absent}")
+    print(f"  Isolates with >1 locus tag      : {dual_tag}  (potential nfsA+objC contamination)")
+    print(f"  Locus tags not found in FAA     : {len(not_found)}")
+    print(f"\n  Output files written to: {output_dir}")
+    print(f"  - {gene_name}_all_sequences.faa")
+    print(f"  - {gene_name}_locus_tag_summary.tsv")
+    print(f"  - {gene_name}_missing_isolates.txt")
+    print(f"  - {gene_name}_sequence_not_found.txt")
+    print(f"{'='*55}\n")
+
+
+def main():
+    args = parse_args()
+
+    print(f"\nReading presence/absence file: {args.presence_absence}")
+    isolate_names, nfsa_rows = read_presence_absence(args.presence_absence, args.gene_name)
+
+    if not nfsa_rows:
+        sys.exit(f"ERROR: No rows matching '{args.gene_name}' found. Check gene name and CSV.")
+
+    faa_index = index_faa_files(args.faa_dir, args.faa_ext, isolate_names)
+
+    print("\nExtracting sequences...")
+    isolate_summary, missing_isolates, not_found = extract_sequences(
+        isolate_names, nfsa_rows, faa_index, args.gene_name, args.output_dir
+    )
+
+    print_summary(isolate_names, isolate_summary, missing_isolates, not_found,
+                  args.output_dir, args.gene_name)
+
+
+if __name__ == "__main__":
+    main()
