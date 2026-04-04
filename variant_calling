@@ -1,0 +1,21 @@
+#! /bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=snippy
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=short
+#SBATCH --mem=6G
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/snippy_4.6.0
+
+mapfile -t libraries < libs.txt
+
+mkdir -p snippy_results
+
+snippy --cpus 1 --outdir snippy_results/${libraries[${SLURM_ARRAY_TASK_ID}]} \
+       --ref /mnt/shared/scratch/hhocking/GCF_000005845.2_ASM584v2_genomic.gbff \
+       --prefix ${libraries[${SLURM_ARRAY_TASK_ID}]} \
+       --R1 /mnt/shared/scratch/reads/${libraries[${SLURM_ARRAY_TASK_ID}]}_1_trimmed.fastq.gz \
+       --R2 /mnt/shared/scratch/reads/${libraries[${SLURM_ARRAY_TASK_ID}]}_2_trimmed.fastq.gz
