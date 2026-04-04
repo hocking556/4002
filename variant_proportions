@@ -1,4 +1,4 @@
-
+#### script to calculate proportions of loss of function variants in non essential genes ###
 #!/bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking
 #SBATCH --job-name=variant_summary
