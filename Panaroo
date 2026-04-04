@@ -1,4 +1,4 @@
-### Script for running panaroo on 745 isolates 
+## Script for running panaroo on 745 isolates 
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
 #SBATCH -J  panaroo
