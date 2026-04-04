@@ -1,0 +1,326 @@
+### script to create phylogenetic plot of tanzanian isolates with resistance determinents plotted ####
+# ── 1. Libraries ───────────────────────────────────────────────────────────────
+library(ggtree)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(phangorn)
+library(tidyr)
+library(ggnewscale)
+library(stringr)
+library(ape)
+
+# ── 2. Load and root tree ──────────────────────────────────────────────────────
+tree_TZ        <- read.tree("/Users/harryhocking/core_tree_gamma_TZ.newick")
+tree_TZ_rooted <- midpoint(tree_TZ)
+tree_TZ_rooted$edge.length <- tree_TZ_rooted$edge.length / max(tree_TZ_rooted$edge.length)
+tree_TZ_rooted$edge.length[tree_TZ_rooted$edge.length > 0.5] <- 0.5
+tree_TZ_rooted$root.edge   <- 0
+tree_TZ_rooted$tip.label   <- gsub("^0+", "", tree_TZ_rooted$tip.label)
+n_tips <- length(tree_TZ_rooted$tip.label)
+
+# ── 3. Parse MLST ─────────────────────────────────────────────────────────────
+mlst <- read.delim("/Users/harryhocking/mlst_summary_clean.csv", sep = "\t", header = TRUE) %>%
+  mutate(
+    FILE = gsub(".*/", "", FILE),
+    FILE = gsub("\\.fasta$", "", FILE),
+    FILE = gsub("^0+", "", FILE),
+    ST   = ifelse(ST == "-", "Novel", as.character(ST))
+  )
+
+st_freq   <- mlst %>% count(ST, name = "count")
+named_sts <- st_freq %>% pull(ST) %>% sort()
+
+# ── 4. Build tip metadata ──────────────────────────────────────────────────────
+tip_data <- data.frame(
+  sample_id = tree_TZ_rooted$tip.label
+) %>%
+  mutate(MNG = sub("_.*", "", sample_id)) %>%
+  left_join(mlst %>% select(FILE, ST), by = c("sample_id" = "FILE")) %>%
+  mutate(ST_plot = case_when(
+    is.na(ST)  ~ "Other",
+    TRUE       ~ ST
+  ))
+
+# ── Extract isolate list (for cross-referencing MIC data) ─────────────────────
+tanzanian_isolates <- tip_data %>%
+  select(sample_id, MNG) %>%
+  arrange(sample_id)
+
+# ── 5. Colour palette ─────────────────────────────────────────────────────────
+qual_colours <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#C85200", "#0072B2",
+  "#D55E00", "#CC79A7", "#3CB371", "#E41A1C", "#377EB8",
+  "#4DAF4A", "#984EA3", "#FF7F00", "#A65628", "#F781BF",
+  "#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854",
+  "#B3446C", "#E5C494", "#1B9E77", "#D95F02", "#7570B3",
+  "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666"
+)
+st_colours        <- c(setNames(rep_len(qual_colours, length(named_sts)), named_sts), "Other" = "grey60")
+st_colours["131"] <- "#1B7837"
+all_st_colours    <- c(st_colours, "0" = "grey40")
+
+# ── 6. groupOTU for branch colouring ──────────────────────────────────────────
+st_groups    <- tip_data %>% filter(ST_plot != "Other", ST_plot != "Novel") %>%
+  split(.$ST_plot) %>% lapply(function(x) x$sample_id)
+tree_grouped <- groupOTU(tree_TZ_rooted, st_groups, group_name = "ST_group")
+
+# ── 7. MRCA positions for ST labels ───────────────────────────────────────────
+tree_df <- as.data.frame(fortify(tree_grouped))
+tip_y   <- tree_df %>% filter(isTip) %>% select(label, y)
+
+st_positions <- tip_data %>%
+  filter(ST_plot != "Other", ST_plot != "Novel") %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  group_by(ST_plot) %>%
+  summarise(y_min = min(y), y_max = max(y), y_mid = (min(y) + max(y)) / 2, .groups = "drop") %>%
+  mutate(colour   = st_colours[ST_plot],
+         st_label = ifelse(ST_plot == "Novel", "Novel", paste0("ST", ST_plot)))
+
+st_positions$x_mrca <- sapply(st_positions$ST_plot, function(st) {
+  tips_st <- tip_data %>% filter(ST_plot == st) %>% pull(sample_id)
+  if (length(tips_st) == 1) tree_df %>% filter(label == tips_st) %>% pull(x)
+  else { mrca_node <- getMRCA(tree_TZ_rooted, tips_st); tree_df %>% filter(node == mrca_node) %>% pull(x) }
+})
+
+# ── 8. Load AMR/Snippy dataframes from disk ───────────────────────────────────
+snippy_nfsA_tz <- readRDS("/Users/harryhocking/snippy_nfsA.rds") %>%
+  rename(snippy_nfsA = trunc_nfsA)
+snippy_nfsB_tz <- readRDS("/Users/harryhocking/snippy_nfsB.rds") %>%
+  rename(snippy_nfsB = trunc_nfsB)
+amr_nfsA_tz    <- readRDS("/Users/harryhocking/amr_nfsA.rds")
+amr_nfsB_tz    <- readRDS("/Users/harryhocking/amr_nfsB.rds")
+
+# ── 9. Load MIC data from CSV ─────────────────────────────────────────────────
+TZ_isolates_MIC <- read.csv("/Users/harryhocking/TZ_MICs.csv", header = FALSE,
+                             col.names = c("sample_id", "MIC"))
+
+# ── 10. Join all metadata to tip positions ────────────────────────────────────
+meta <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  rename(y_pos = y) %>%
+  left_join(snippy_nfsA_tz, by = "sample_id") %>%
+  left_join(snippy_nfsB_tz, by = "sample_id") %>%
+  left_join(amr_nfsA_tz,    by = "sample_id") %>%
+  left_join(amr_nfsB_tz,    by = "sample_id") %>%
+  left_join(ECOFF_classified %>% select(MNG, F100_SIR) %>% mutate(MNG = as.character(MNG)), by = "MNG") %>%
+  left_join(TZ_isolates_MIC %>% select(sample_id, MIC), by = "sample_id") %>%
+  mutate(
+    snippy_nfsA = ifelse(snippy_nfsA == "Truncated", "Present", NA_character_),
+    snippy_nfsB = ifelse(snippy_nfsB == "Truncated", "Present", NA_character_),
+    snippy_nfsA_col = ifelse(!is.na(snippy_nfsA), "nfsA", NA_character_),
+    snippy_nfsB_col = ifelse(!is.na(snippy_nfsB), "nfsB", NA_character_),
+    amr_nfsA    = ifelse(amr_nfsA    == "Present",   "Present", NA_character_),
+    amr_nfsB    = ifelse(amr_nfsB    == "Present",   "Present", NA_character_),
+    F100_SIR    = factor(ifelse(is.na(F100_SIR), "NA", as.character(F100_SIR)), levels = c("S", "R", "NA")),
+    MIC_plot    = factor(
+      case_when(
+        is.na(MIC)   ~ "No MIC data",
+        MIC <= 16    ~ "<=16",
+        MIC == 32    ~ "32",
+        MIC == 64    ~ "64",
+        MIC >= 128   ~ ">=128",
+        TRUE         ~ "No MIC data"
+      ),
+      levels = c("<=16", "32", "64", ">=128", "No MIC data")
+    )
+  )
+
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+cat("Checking y_pos alignment with ggtree coordinates:\n")
+check_alignment <- meta %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  mutate(aligned = y_pos == y) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE))
+print(check_alignment)
+
+cat("\nMIC data summary:\n")
+print(table(meta$MIC_plot, useNA = "always"))
+
+cat("\nNitrofurantoin R positives - y_pos vs ggtree y:\n")
+meta %>%
+  filter(F100_SIR == "R") %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  select(sample_id, y_pos, y, ST_plot) %>%
+  mutate(aligned = y_pos == y) %>%
+  summarise(total = n(), correct = sum(aligned), incorrect = sum(!aligned)) %>%
+  print()
+
+# ── 11. Bar position settings ─────────────────────────────────────────────────
+tile_width  <- 0.25
+bar_gap     <- 0.08
+x_tree_max  <- max(tree_df$x, na.rm = TRUE)
+x_start     <- x_tree_max + 0.16
+
+x_F100     <- x_start
+x_MIC      <- x_F100  + tile_width + bar_gap * 0.05
+x_anfsA    <- x_MIC   + tile_width + bar_gap * 2
+x_snfsA    <- x_anfsA + tile_width + bar_gap * 2
+x_snfsB    <- x_snfsA + tile_width + bar_gap
+
+x_band_max <- x_snfsB + tile_width + 0.05
+
+# ── 12. Alternating bands ─────────────────────────────────────────────────────
+band_data <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  arrange(y) %>%
+  mutate(
+    run_id = cumsum(ST_plot != lag(ST_plot, default = first(ST_plot)))
+  ) %>%
+  group_by(run_id, ST_plot) %>%
+  summarise(y_min = min(y), y_max = max(y), .groups = "drop") %>%
+  arrange(y_min) %>%
+  mutate(band = row_number() %% 2) %>%
+  filter(band == 0)
+
+# ── 13. Build tree ─────────────────────────────────────────────────────────────
+p <- suppressWarnings(
+  ggtree(tree_grouped, layout = "rectangular",
+         aes(colour = ST_group), linewidth = 0.4)) +
+  geom_rect(
+    data = band_data,
+    aes(xmin = 0, xmax = x_band_max, ymin = y_min - 0.5, ymax = y_max + 0.5),
+    fill = "grey92", colour = NA, inherit.aes = FALSE, alpha = 0.6
+  ) +
+  geom_tree(aes(colour = ST_group), linewidth = 0.4) +
+  scale_colour_manual(
+    name     = "Sequence Type",
+    values   = all_st_colours,
+    breaks   = c(named_sts, "Other"),
+    labels   = c(ifelse(named_sts == "Novel", "Novel", paste0("ST", named_sts)), "Other"),
+    na.value = "grey40",
+    guide    = "none"
+  ) +
+  geom_tippoint(aes(colour = ST_group), size = 1.5, show.legend = FALSE) +
+  ggrepel::geom_text_repel(
+    data            = st_positions,
+    aes(x = x_mrca, y = y_mid, label = st_label, colour = ST_plot),
+    size            = 3.5,
+    fontface        = "bold.italic",
+    hjust           = 1, direction = "y",
+    nudge_x         = -0.15,
+    segment.size    = 0.15, segment.colour = "grey50",
+    box.padding     = 0.15, force = 1,
+    max.overlaps    = Inf, inherit.aes = FALSE, show.legend = FALSE,
+    bg.colour       = "white", bg.r = 0.15
+  ) +
+  theme_tree() +
+  theme(plot.margin = unit(c(4, 1, 1, 0), "cm")) +
+  xlim(-0.05, x_band_max + 0.05) +
+
+  # ── NIT-DD (disk diffusion) ──
+  new_scale_colour() + new_scale_fill() +
+  geom_tile(data = meta,
+            aes(x = x_F100, y = y_pos, fill = F100_SIR),
+            width = tile_width, height = 1, inherit.aes = FALSE,
+            colour = "white", linewidth = 0.3) +
+  scale_fill_manual(name   = "NIT-DD",
+                    values = c("S" = "#4DAF4A", "R" = "#E41A1C", "NA" = "grey70"),
+                    labels = c("S" = "S", "R" = "R", "NA" = "N/A"),
+                    na.value = "grey70",
+                    guide  = guide_legend(order = 1, override.aes = list(size = 6))) +
+
+
+  # ── MIC tiles ──
+  new_scale_fill() +
+  geom_tile(data = meta,
+            aes(x = x_MIC, y = y_pos, fill = MIC_plot),
+            width = tile_width, height = 1, inherit.aes = FALSE,
+            colour = "white", linewidth = 0.3) +
+  scale_fill_manual(
+    name   = "NIT-MIC\n(mg/L)",
+    values = c(
+      "<=16"        = "#4DAF4A",
+      "32"          = "#FFD700",
+      "64"          = "#FF6600",
+      ">=128"       = "#CC0000",
+      "No MIC data" = "grey70"
+    ),
+    labels = c(
+      "<=16"        = "<=16",
+      "32"          = "32",
+      "64"          = "64",
+      ">=128"       = ">=128",
+      "No MIC data" = "No MIC data"
+    ),
+    na.value = "grey70",
+    drop = FALSE,
+    guide  = guide_legend(order = 2, override.aes = list(size = 6))
+  ) +
+
+  # ── AMRFinder nfsA ──
+  new_scale_fill() +
+  geom_tile(data = meta %>% filter(!is.na(amr_nfsA)),
+            aes(x = x_anfsA, y = y_pos, fill = amr_nfsA),
+            width = tile_width, height = 1, inherit.aes = FALSE,
+            colour = "white", linewidth = 0.3) +
+  scale_fill_manual(name   = "AMRFinder",
+                    values = c("Present" = "#2D0057"), na.value = "white",
+                    labels = c("Present" = "nfsA"),
+                    guide  = guide_legend(order = 3, override.aes = list(size = 6))) +
+
+  # ── Snippy nfsA + nfsB (combined scale) ──
+  new_scale_fill() +
+  geom_tile(data = meta %>% filter(!is.na(snippy_nfsA_col)),
+            aes(x = x_snfsA, y = y_pos, fill = snippy_nfsA_col),
+            width = tile_width, height = 1, inherit.aes = FALSE,
+            colour = "white", linewidth = 0.3) +
+  geom_tile(data = meta %>% filter(!is.na(snippy_nfsB_col)),
+            aes(x = x_snfsB, y = y_pos, fill = snippy_nfsB_col),
+            width = tile_width, height = 1, inherit.aes = FALSE,
+            colour = "white", linewidth = 0.3) +
+  scale_fill_manual(name   = "Variant Calling",
+                    values = c("nfsA" = "#6A0DAD", "nfsB" = "#B44FD4"),
+                    labels = c("nfsA" = "nfsA", "nfsB" = "nfsB"),
+                    na.value = "white",
+                    guide  = guide_legend(order = 4, override.aes = list(size = 6))) +
+
+  theme(
+    legend.position  = "right",
+    legend.text      = element_text(size = 12),
+    legend.title     = element_text(size = 13, face = "bold"),
+    legend.key.size  = unit(0.8, "cm"),
+    legend.spacing.y = unit(0.3, "cm")
+  ) +
+  guides(colour = "none") +
+  coord_cartesian(clip = "off")
+
+# ── 14. Column headings ────────────────────────────────────────────────────────
+y_label <- n_tips + n_tips * 0.02
+
+col_labels <- list(
+  list(x = x_anfsA, label = "nfsA"),
+  list(x = x_snfsA, label = "nfsA"),
+  list(x = x_snfsB, label = "nfsB")
+)
+for (col in col_labels) {
+  p <- p + annotate("text", x = col$x, y = y_label, label = col$label,
+                    size = 5, fontface = "bold", hjust = 0, angle = 45)
+}
+
+# Group headings
+y_row2 <- n_tips + n_tips * 0.055
+p <- p +
+  annotate("text", x = x_F100, y = y_row2,
+           label = "NIT-DD", size = 5.5, fontface = "bold", hjust = 0.5) +
+  annotate("text", x = x_MIC, y = y_row2,
+           label = "NIT-MIC\n(mg/L)", size = 5.5, fontface = "bold", hjust = 0.5) +
+  annotate("text", x = x_anfsA, y = y_row2,
+           label = "AMRFinder", size = 5.5, fontface = "bold", hjust = 0.5) +
+  annotate("text", x = (x_snfsA + x_snfsB) / 2, y = y_row2,
+           label = "Variant Calling", size = 5.5, fontface = "bold", hjust = 0.5) +
+  annotate("segment",
+           x = x_anfsA - tile_width/2, xend = x_anfsA + tile_width/2,
+           y = y_row2 - n_tips*0.01, yend = y_row2 - n_tips*0.01,
+           colour = "black", linewidth = 0.4) +
+  annotate("segment",
+           x = x_snfsA - tile_width/2, xend = x_snfsB + tile_width/2,
+           y = y_row2 - n_tips*0.01, yend = y_row2 - n_tips*0.01,
+           colour = "black", linewidth = 0.4)
+
+# ── 15. Block labels ──────────────────────────────────────────────────────────
+# (Placeholder — add mutation labels here after confirming cluster positions)
+
+# ── 16. Save ───────────────────────────────────────────────────────────────────
+ggsave("/Users/harryhocking/tree_TZ_nitro_v19.pdf", p, width = 22, height = 30)
+ggsave("/Users/harryhocking/tree_TZ_nitro_v19.png", p, width = 22, height = 30, dpi = 600)
