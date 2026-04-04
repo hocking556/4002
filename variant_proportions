@@ -1,0 +1,105 @@
+
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking
+#SBATCH --job-name=variant_summary
+#SBATCH --output=logs/variant_summary_%j.out
+#SBATCH --error=logs/variant_summary_%j.err
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=8G
+#SBATCH --partition=medium
+
+# ─── USER CONFIG ───────────────────────────────────────────────────────────────
+STOP_DIR="/mnt/shared/scratch/hhocking/gene_stop_pull3"
+FRAME_DIR="/mnt/shared/scratch/hhocking/gene_frame_pull3"
+OUTPUT_FILE="/mnt/shared/scratch/hhocking/variant_summary_corrected_745.tsv"
+TOTAL_ISOLATES=745
+# ───────────────────────────────────────────────────────────────────────────────
+
+# ─── Essential genes to exclude ───────────────────────────────────────────────
+ESSENTIAL=(
+alsK bcsB mazE chpS entD minD minE waaU rnc tdcF tnaB yabQ yafF yagG ydfB
+ydiL yefM mqsA yhbV yhhQ yibJ ubiJ yqgD rsmI mlaB cydA cydC purB racR rpoE
+ubiB ubiD wzyE cohE polA parC prfB rho rpoD rsgA tadA dnaG dnaT folB glmM
+ispH bce lptB degS folK ftsE ftsK ftsN ftsX ribB glyS groL hda ileS nusB
+rseP secD secF secM spoT yceQ yejM lptC ribF lptD erpA bamA lptE murJ prs
+tsaB bamD nadK tsaD lptA tsaC waaA tsaE lptF lptG lspA dapB folA ftsL ftsI
+murE murF mraY murD ftsW murG murC ftsQ ftsA ftsZ lpxC secA can hemL dapD
+map rpsB tsf pyrH frr dxr ispU cdsA lpxD fabZ lpxA lpxB dnaE accA tilS
+proS hemB ribD ribE thiL dxs ispA dnaX adk hemH lpxH cysS folD mrdB mrdA
+nadD holA leuS lnt glnS fldA infA lolA serS rpsA msbA lpxK kdsB mukF mukE
+mukB asnS fabA fabD fabG acpP tmk holB lolC lolD lolE pth ispE lolB hemA
+prfA prmC kdsA topA ribA fabI tyrS ribC pheT pheS rplT infC thrS nadE gapA
+aspS argS pgsA metG folE gyrA nrdA nrdB folC accD fabB gltX ligA zipA dapE
+dapA der hisS ispG suhB acpS era lepB pssA rplS trmD rpsP ffh grpE csrA
+ispF ispD ftsB eno pyrG lgt fbaA pgk metK yqgF plsC parE cca infB nusA
+ftsH obgE rpmA rplU ispB murA rpsI rplM mreD mreC mreB accB accC def fmt
+rplQ rpoA rpsD rpsK rpsM secY rplO rpmD rpsE rplR rplF rpsH rpsN rplE rplX
+rplN rpsQ rpmC rplP rpsC rplV rpsS rplB rplW rplD rplC rpsJ fusA rpsG rpsL
+trpS yrfF asd rpoH ftsY glyQ gpsA coaD rpmB dfp dut gmk gyrB dnaN dnaA
+rpmH rnpA yidC glmS glmU hemD hemC hemG yihA murI murB birA secE nusG rplJ
+rplL rpoB rpoC ubiA plsB lexA dnaB ssb groS psd orn rpsR ppa valS dnaC
+)
+
+# Build a lookup string for fast exclusion checking
+ESSENTIAL_LOOKUP=" ${ESSENTIAL[*]} "
+
+is_essential() {
+    [[ "$ESSENTIAL_LOOKUP" == *" $1 "* ]]
+}
+
+# ─── Write header ──────────────────────────────────────────────────────────────
+echo -e "gene\tn_isolates_stop\tprop_stop\tn_isolates_frame\tprop_frame\tn_isolates_combined\tprop_combined" > "$OUTPUT_FILE"
+
+# ─── Get union of all genes from both directories ─────────────────────────────
+{
+for f in "$STOP_DIR"/*_stop.csv "$FRAME_DIR"/*_frame.csv; do
+    [[ -f "$f" ]] || continue
+    basename "$f" | sed 's/_stop\.csv//;s/_frame\.csv//'
+done
+} | sort -u | while read -r gene; do
+
+    # Skip essential genes (unless nfsA or nfsB)
+    if [[ "$gene" != "nfsA" && "$gene" != "nfsB" ]]; then
+        if is_essential "$gene"; then
+            continue
+        fi
+    fi
+
+    # ── Count unique isolates with stop_gained ────────────────────────────────
+    stopfile="${STOP_DIR}/${gene}_stop.csv"
+    if [[ -f "$stopfile" ]]; then
+        n_stop=$(awk -F'/' '{print $1}' "$stopfile" | sort -u | wc -l)
+    else
+        n_stop=0
+    fi
+
+    # ── Count unique isolates with frameshift ─────────────────────────────────
+    framefile="${FRAME_DIR}/${gene}_frame.csv"
+    if [[ -f "$framefile" ]]; then
+        n_frame=$(awk -F'/' '{print $1}' "$framefile" | sort -u | wc -l)
+    else
+        n_frame=0
+    fi
+
+    # ── Count unique isolates with either (union) ─────────────────────────────
+    if [[ -f "$stopfile" && -f "$framefile" ]]; then
+        n_combined=$(cat "$stopfile" "$framefile" | awk -F'/' '{print $1}' | sort -u | wc -l)
+    elif [[ -f "$stopfile" ]]; then
+        n_combined=$n_stop
+    elif [[ -f "$framefile" ]]; then
+        n_combined=$n_frame
+    else
+        n_combined=0
+    fi
+
+    # ── Calculate proportions ─────────────────────────────────────────────────
+    prop_stop=$(echo "scale=6; $n_stop / $TOTAL_ISOLATES" | bc)
+    prop_frame=$(echo "scale=6; $n_frame / $TOTAL_ISOLATES" | bc)
+    prop_combined=$(echo "scale=6; $n_combined / $TOTAL_ISOLATES" | bc)
+
+    echo -e "${gene}\t${n_stop}\t${prop_stop}\t${n_frame}\t${prop_frame}\t${n_combined}\t${prop_combined}"
+
+done >> "$OUTPUT_FILE"
+
+echo "Done! Summary written to $OUTPUT_FILE"
