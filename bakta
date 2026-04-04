@@ -1,4 +1,4 @@
-##### script for running Bakta #####
+##### script for running Bakta ######
 
 #!/bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
