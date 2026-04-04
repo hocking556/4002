@@ -1,3 +1,5 @@
+#### script for variant calling using snippy #####
+
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
 #SBATCH --job-name=snippy
