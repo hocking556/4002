@@ -1,3 +1,5 @@
+##### script for running amrfinder #####
+
 #!/bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
 #SBATCH --job-name=amrfinder
