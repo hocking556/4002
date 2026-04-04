@@ -1,0 +1,28 @@
+#! /bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=restest
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=hicpu
+#SBATCH --mem=1G
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/resfinder_4.7.2
+
+mapfile -t libraries < libs.txt
+
+mkdir -p resfinder_fna
+
+
+# Example of running resfinder
+python -m resfinder \
+       -ifa /mnt/shared/scratch/hhocking/fna/${libraries[${SLURM_ARRAY_TASK_ID}]}.fna \
+       -o /mnt/shared/scratch/hhocking/resfinder_fna/${libraries[${SLURM_ARRAY_TASK_ID}]}.resfinder.tsv \
+       -db_res /home/hhocking/resfinder_db \
+       -db_point /home/hhocking/pointfinder_db \
+       -acq \
+       -c \
+       -s "Escherichia coli" \
+       -l 0.6 \
+       -t 0.8 \
