@@ -1,0 +1,46 @@
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=blast_search
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=short
+#SBATCH --mem=1G
+
+# Activate BLAST conda environment
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/blast_2.17.0
+
+# Load genome names from libs.txt
+mapfile -t libraries < libs.txt
+
+# Create output directories
+mkdir -p blast_dbQ
+mkdir -p hits
+
+# Get current genome name
+GENOME_NAME=${libraries[${SLURM_ARRAY_TASK_ID}]}
+GENOME_FILE="/mnt/shared/scratch/hhocking/data/assemblies/${GENOME_NAME}.fasta"
+
+# Create unique database name using array task ID
+DB_NAME="blast_dbQ/${GENOME_NAME}_${SLURM_ARRAY_TASK_ID}"
+
+# Create BLAST database for this genome
+makeblastdb -in ${GENOME_FILE} \
+            -dbtype nucl \
+            -out ${DB_NAME}
+
+# Run BLAST search
+blastn -task megablast \
+       -query /mnt/shared/scratch/hhocking/NITREc_reference_R/NITREc_nucleotides_R.fna \
+       -db ${DB_NAME} \
+       -out hits/${GENOME_NAME}_blast_results.txt \
+       -outfmt 6 \
+       -perc_identity 100 \
+       -max_target_seqs 10 \
+       -max_hsps 1 \
+       -evalue 1e-5 \
+       -num_threads 1
+
+# Clean up database files after BLAST completes
+rm ${DB_NAME}.*
