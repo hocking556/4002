@@ -1,4 +1,4 @@
-#### script for variant calling using snippy #####
+#### script for variant calling using snippy ######
 
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
