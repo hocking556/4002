@@ -1,0 +1,267 @@
+"""
+4 separate DNA Features Viewer plots combining Snippy and AMRFinder mutations
+for nfsA and nfsB, using gene-relative nucleotide coordinates.
+
+Output files:
+  DNAFV_plots/plot1_variant_calling_nfsA.png
+  DNAFV_plots/plot2_variant_calling_nfsB.png
+  DNAFV_plots/plot3_amrfinder_nfsA.png
+  DNAFV_plots/plot4_amrfinder_nfsB.png
+
+Requirements:
+    conda run -n pandas python DNAFV_4panel.py
+"""
+
+import os
+import re
+import sys
+import glob
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from dna_features_viewer import GraphicRecord, GraphicFeature
+
+print("imports done"); sys.stdout.flush()
+
+# Three-letter to one-letter amino acid code conversion
+AA3_TO_1 = {
+    "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C",
+    "Gln": "Q", "Glu": "E", "Gly": "G", "His": "H", "Ile": "I",
+    "Leu": "L", "Lys": "K", "Met": "M", "Phe": "F", "Pro": "P",
+    "Ser": "S", "Thr": "T", "Trp": "W", "Tyr": "Y", "Val": "V",
+    "Ter": "Ter", "fs": "fs", "del": "del", "ins": "ins", "ext": "ext",
+}
+
+def convert_aa_label(label):
+    """Convert p.Gln113* style to p.Q113* style."""
+    # Remove p. prefix for processing
+    if label.startswith("p."):
+        inner = label[2:]
+    else:
+        inner = label
+
+    # Replace all three-letter codes with one-letter codes
+    for three, one in AA3_TO_1.items():
+        inner = inner.replace(three, one)
+
+    return "p." + inner if label.startswith("p.") else inner
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+SNIPPY_DIR     = "/mnt/shared/scratch/hhocking/snippy_results"
+AMRFINDER_NFSA = "/mnt/shared/scratch/hhocking/amrfinderMI_nfsA.txt"
+AMRFINDER_NFSB = "/mnt/shared/scratch/hhocking/amrfinderMI_nfsB.txt"
+OUT_DIR        = "/mnt/shared/scratch/hhocking/DNAFV_plots"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# Reference genome coordinates (used to convert Snippy positions to gene-relative)
+NFSA_START, NFSA_END = 891184, 891906   # gene length = 722 nt
+NFSB_START, NFSB_END = 604771, 605424   # gene length = 653 nt
+
+# Gene lengths for plot sequence_length
+NFSA_LEN = NFSA_END - NFSA_START
+NFSB_LEN = NFSB_END - NFSB_START
+
+# ---------------------------------------------------------------------------
+# Colours
+# ---------------------------------------------------------------------------
+COLOR_LABELS = {
+    "#ff6666": "Stop gain",
+    "#6699ff": "Frameshift",
+    "#ffcc66": "Inframe deletion",
+    "#cccccc": "Missense",
+}
+
+def get_color_snippy(note):
+    note_lower = note.lower()
+    if "stop_gain" in note_lower:
+        return "#ff6666"
+    elif "frameshift" in note_lower:
+        return "#6699ff"
+    elif "inframe" in note_lower:
+        return "#ffcc66"
+    else:
+        return "#cccccc"
+
+def get_color_amr(label):
+    if re.search(r'Ter|\*', label):
+        return "#ff6666"
+    elif re.search(r'fs', label):
+        return "#6699ff"
+    else:
+        return "#cccccc"
+
+# ---------------------------------------------------------------------------
+# Parse Snippy tab files - positions converted to gene-relative coordinates
+# ---------------------------------------------------------------------------
+def snippy_to_features(snippy_dir, gene, gene_start):
+    all_mutations = []
+    for isolate_dir in glob.glob(os.path.join(snippy_dir, "*")):
+        isolate_name = os.path.basename(isolate_dir)
+        tab_files = glob.glob(os.path.join(isolate_dir, "*.tab"))
+        if not tab_files:
+            continue
+        df = pd.read_csv(tab_files[0], sep="\t")
+        filtered = df[
+            df["GENE"].isin([gene]) |
+            df["LOCUS_TAG"].isin([gene])
+        ].copy()
+        filtered["ISOLATE"] = isolate_name
+        all_mutations.append(filtered)
+
+    if not all_mutations:
+        print(f"  No variant calls found for {gene}")
+        return []
+
+    combined = pd.concat(all_mutations, ignore_index=True)
+    print(f"  Variant calling {gene}: {len(combined)} total rows before dedup/filter")
+
+    features = []
+    seen = set()
+
+    for _, row in combined.iterrows():
+        ref_pos = int(row["POS"])
+        effect  = row["EFFECT"] if pd.notna(row["EFFECT"]) else "unknown"
+
+        # Skip missense and synonymous
+        if "missense" in effect.lower() or "synonymous" in effect.lower():
+            continue
+
+        # Extract p. label and convert to single-letter AA codes
+        label = effect
+        for part in effect.split(" "):
+            if part.startswith("p."):
+                label = convert_aa_label(part)
+                break
+
+        # Convert to gene-relative coordinate
+        rel_pos = ref_pos - gene_start
+
+        # Deduplicate by (rel_pos, label)
+        key = (rel_pos, label)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        features.append(GraphicFeature(
+            start=rel_pos - 1,
+            end=rel_pos,
+            strand=0,
+            label=label,
+            color=get_color_snippy(effect),
+        ))
+
+    print(f"  Variant calling {gene}: {len(features)} unique features after dedup/filter")
+    return features
+
+# ---------------------------------------------------------------------------
+# Parse AMRFinder - positions in gene-relative nucleotide coordinates
+# ---------------------------------------------------------------------------
+def amrfinder_to_features(filepath):
+    features = []
+    seen = set()
+
+    with open(filepath) as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            fields    = line.strip().split("\t")
+            g_start   = int(fields[2])
+            g_end     = int(fields[3])
+            strand    = fields[4]
+            mut_name  = fields[5]
+            mut_label = mut_name.split("_", 1)[-1]  # e.g. G126R
+
+            # Extract aa position and convert to gene-relative nt position
+            m = re.search(r'[A-Za-z](\d+)', mut_label)
+            if m:
+                aa_pos  = int(m.group(1))
+                rel_pos = (aa_pos - 1) * 3  # 0-based nt position within gene
+            else:
+                rel_pos = (g_end - g_start) // 2
+
+            # Deduplicate by label only
+            if mut_label in seen:
+                continue
+            seen.add(mut_label)
+
+            features.append(GraphicFeature(
+                start=rel_pos,
+                end=rel_pos + 1,
+                strand=0,
+                label=mut_label,
+                color=get_color_amr(mut_label),
+            ))
+
+    print(f"  AMRFinder {filepath.split('/')[-1]}: {len(features)} unique features")
+    return features
+
+# ---------------------------------------------------------------------------
+# Build one plot
+# ---------------------------------------------------------------------------
+def make_plot(features, gene_len, gene_name, strand, title, out_path):
+    all_features = list(features) + [
+        GraphicFeature(
+            start=0,
+            end=gene_len,
+            strand=strand,
+            label=gene_name,
+            color="#e8e8e8",
+            box_linewidth=1,
+            box_color="#e8e8e8",
+        )
+    ]
+
+    record = GraphicRecord(sequence_length=gene_len, features=all_features)
+
+    fig, ax = plt.subplots(1, 1, figsize=(20, 5))
+    record.plot(ax=ax, with_ruler=True)
+    ax.set_title(title, loc="left", fontsize=11, fontweight="bold")
+
+    # Legend: only show colours present in this plot's features
+    colors_used = set(f.color for f in features)
+    legend_handles = [
+        plt.matplotlib.patches.Patch(color=col, label=label)
+        for col, label in COLOR_LABELS.items()
+        if col in colors_used
+    ]
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=9,
+                  frameon=True, title="Mutation type", title_fontsize=9)
+
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}"); sys.stdout.flush()
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+print("\nParsing variant calling data..."); sys.stdout.flush()
+snp_nfsa = snippy_to_features(SNIPPY_DIR, "nfsA", NFSA_START)
+snp_nfsb = snippy_to_features(SNIPPY_DIR, "nfsB", NFSB_START)
+
+print("\nParsing AMRFinder data..."); sys.stdout.flush()
+amr_nfsa = amrfinder_to_features(AMRFINDER_NFSA)
+amr_nfsb = amrfinder_to_features(AMRFINDER_NFSB)
+
+print("\nPlotting..."); sys.stdout.flush()
+
+make_plot(snp_nfsa, NFSA_LEN, "nfsA",  1,
+          "Variant calling — nfsA",
+          os.path.join(OUT_DIR, "plot1_variant_calling_nfsA.png"))
+
+make_plot(snp_nfsb, NFSB_LEN, "nfsB", -1,
+          "Variant calling — nfsB",
+          os.path.join(OUT_DIR, "plot2_variant_calling_nfsB.png"))
+
+make_plot(amr_nfsa, NFSA_LEN, "nfsA",  1,
+          "AMRFinder — nfsA",
+          os.path.join(OUT_DIR, "plot3_amrfinder_nfsA.png"))
+
+make_plot(amr_nfsb, NFSB_LEN, "nfsB", -1,
+          "AMRFinder — nfsB",
+          os.path.join(OUT_DIR, "plot4_amrfinder_nfsB.png"))
+
+print("\nAll done."); sys.stdout.flush()
