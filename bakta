@@ -1,3 +1,5 @@
+##### script for running Bakta #####
+
 #!/bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
 #SBATCH --job-name=baktaL
