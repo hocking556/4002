@@ -1,4 +1,4 @@
-####Script used for running ResFinder ########
+####Script used for running ResFinder #########
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
 #SBATCH --job-name=restest
