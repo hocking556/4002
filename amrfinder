@@ -1,0 +1,26 @@
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=amrfinder
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=hicpu
+#SBATCH --mem=1G
+#SBATCH --output=amrfinder_%a.log
+#SBATCH --error=amrfinder_%a.err
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/amrfinder_4.2.7
+
+mapfile -t libraries < libs.txt
+
+sample=${libraries[${SLURM_ARRAY_TASK_ID}]}
+
+mkdir -p amrfinder_MIresults2
+
+amrfinder --nucleotide /mnt/shared/scratch/hhocking/fna/${sample}.fna \
+          --protein /mnt/shared/scratch/hhocking/faa2/${sample}.faa \
+          --gff /mnt/shared/scratch/hhocking/gff3/${sample}.gff3 \
+          --annotation_format bakta \
+          --organism Escherichia \
+          --output amrfinder_MIresults2/${sample}.amrfinder.tsv
