@@ -1,0 +1,30 @@
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=baktaL
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --partition=short 
+#SBATCH --mem=48G
+#SBATCH --time=00:45:00
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/bakta_1.12.0
+
+# Get the specific file for this array task
+FASTA_FILE=$(ls /mnt/shared/scratch/hhocking/data/assemblies/*.fasta | sed -n "$((SLURM_ARRAY_TASK_ID + 1))p")
+SAMPLE=$(basename ${FASTA_FILE} .fasta)
+
+# Create output directory
+mkdir -p /mnt/shared/scratch/hhocking/bakta_resultsL
+
+# Run Bakta
+bakta \
+  --db /mnt/shared/scratch/hhocking/db \
+  --genus Escherichia \
+  --species coli \
+  --verbose \
+  --output /mnt/shared/scratch/hhocking/bakta_resultsL/${SAMPLE} \
+  --prefix ${SAMPLE} \
+  --threads 16 \
+  ${FASTA_FILE}
