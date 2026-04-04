@@ -1,3 +1,5 @@
+##### script for producing gene neighbourhood #####
+
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
 #SBATCH --job-name=panaroo
