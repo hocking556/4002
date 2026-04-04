@@ -1,4 +1,4 @@
-##### script for producing gene neighbourhood #####
+##### script for producing gene neighbourhood ######
 
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
