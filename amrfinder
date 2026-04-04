@@ -1,4 +1,4 @@
-##### script for running amrfinder #####
+##### script for running amrfinder ######
 
 #!/bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
