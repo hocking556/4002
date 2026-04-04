@@ -1,0 +1,26 @@
+###### script for running abritamr #####
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=abritamr
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --partition=short
+#SBATCH --mem=8G
+#SBATCH --output=abritamr_%a.log
+#SBATCH --error=abritamr_%a.err
+
+source /mnt/apps/users/hhocking/conda/etc/profile.d/conda.sh
+conda activate abritamr
+
+mapfile -t libraries < /mnt/shared/scratch/hhocking/libs.txt
+
+sample=${libraries[${SLURM_ARRAY_TASK_ID}]}
+
+mkdir -p abritamr_results3
+
+abritamr run \
+    --contigs /mnt/shared/scratch/hhocking/fna/${sample}.fna \
+    --prefix abritamr_results3/${sample} \
+    --species Escherichia
