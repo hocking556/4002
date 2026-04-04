@@ -1,0 +1,304 @@
+library(ggtree)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(phangorn)
+library(tidyr)
+library(ggnewscale)
+library(stringr)
+library(ape)
+
+# ── 2. Load and root tree ──────────────────────────────────────────────────────
+tree_TZ        <- read.tree("/Users/harryhocking/core_tree_gamma_TZ.newick")
+tree_TZ_rooted <- midpoint(tree_TZ)
+tree_TZ_rooted$edge.length <- tree_TZ_rooted$edge.length / max(tree_TZ_rooted$edge.length)
+tree_TZ_rooted$edge.length[tree_TZ_rooted$edge.length > 0.5] <- 0.5
+tree_TZ_rooted$root.edge   <- 0
+tree_TZ_rooted$tip.label   <- gsub("^0+", "", tree_TZ_rooted$tip.label)
+n_tips <- length(tree_TZ_rooted$tip.label)
+
+# ── 3. Parse MLST ─────────────────────────────────────────────────────────────
+mlst <- read.delim("/Users/harryhocking/mlst_summary_clean.csv", sep = "\t", header = TRUE) %>%
+  mutate(
+    FILE = gsub(".*/", "", FILE),
+    FILE = gsub("\\.fasta$", "", FILE),
+    FILE = gsub("^0+", "", FILE),
+    ST   = ifelse(ST == "-", "Novel", as.character(ST))
+  )
+
+st_freq   <- mlst %>% count(ST, name = "count")
+named_sts <- st_freq %>% pull(ST) %>% sort()
+
+# ── 4. Build tip metadata ──────────────────────────────────────────────────────
+tip_data <- data.frame(
+  sample_id = tree_TZ_rooted$tip.label
+) %>%
+  mutate(MNG = sub("_.*", "", sample_id)) %>%
+  left_join(mlst %>% select(FILE, ST), by = c("sample_id" = "FILE")) %>%
+  mutate(ST_plot = case_when(
+    is.na(ST) ~ "Other",
+    TRUE      ~ ST
+  ))
+
+# ── 5. Colour palette ─────────────────────────────────────────────────────────
+qual_colours <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#C85200", "#0072B2",
+  "#D55E00", "#CC79A7", "#000000", "#E41A1C", "#377EB8",
+  "#4DAF4A", "#984EA3", "#FF7F00", "#A65628", "#F781BF",
+  "#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854",
+  "#B3446C", "#E5C494", "#1B9E77", "#D95F02", "#7570B3",
+  "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666"
+)
+st_colours     <- c(setNames(rep_len(qual_colours, length(named_sts)), named_sts), "Other" = "grey60")
+st_colours["131"] <- "#1B7837"
+all_st_colours <- c(st_colours, "0" = "grey40")
+
+# ── 6. groupOTU for branch colouring ──────────────────────────────────────────
+st_groups    <- tip_data %>% filter(ST_plot != "Other", ST_plot != "Novel") %>%
+  split(.$ST_plot) %>% lapply(function(x) x$sample_id)
+tree_grouped <- groupOTU(tree_TZ_rooted, st_groups, group_name = "ST_group")
+
+# ── 7. MRCA positions for ST labels ───────────────────────────────────────────
+tree_df <- as.data.frame(fortify(tree_grouped))
+tip_y   <- tree_df %>% filter(isTip) %>% select(label, y)
+
+st_positions <- tip_data %>%
+  filter(ST_plot != "Other", ST_plot != "Novel") %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  group_by(ST_plot) %>%
+  summarise(y_min = min(y), y_max = max(y), y_mid = (min(y) + max(y)) / 2, .groups = "drop") %>%
+  mutate(colour   = st_colours[ST_plot],
+         st_label = ifelse(ST_plot == "Novel", "Novel", paste0("ST", ST_plot)))
+
+st_positions$x_mrca <- sapply(st_positions$ST_plot, function(st) {
+  tips_st <- tip_data %>% filter(ST_plot == st) %>% pull(sample_id)
+  if (length(tips_st) == 1) tree_df %>% filter(label == tips_st) %>% pull(x)
+  else { mrca_node <- getMRCA(tree_TZ_rooted, tips_st); tree_df %>% filter(node == mrca_node) %>% pull(x) }
+})
+
+# ── 8. Load MIC data ──────────────────────────────────────────────────────────
+TZ_isolates_MIC <- read.csv("/Users/harryhocking/TZ_MICs.csv", header = FALSE,
+                             col.names = c("sample_id", "MIC"))
+
+# ── 9. Prepare AST data ────────────────────────────────────────────────────────
+sir_cols   <- c("AMP10_SIR","AMC30_SIR","CRO30_SIR","CAZ30_SIR","CTX30_SIR",
+                "FEP30_SIR","TZP110_SIR","MEM10_SIR","W5_SIR",
+                "CN10_SIR","CIP_SIR","TET30_SIR","AK30_SIR","F100_SIR")
+sir_labels <- gsub("_SIR$", "", sir_cols)
+sir_labels_clean <- c(
+  "Ampicillin",
+  "Co-amoxiclav",
+  "Ceftriaxone",
+  "Ceftazidime",
+  "Cefotaxime",
+  "Cefepime",
+  "Pip/Tazobactam",
+  "Meropenem",
+  "Trimethoprim",
+  "Gentamicin",
+  "Ciprofloxacin",
+  "Tetracycline",
+  "Amikacin",
+  "Nitrofurantoin"
+)
+
+ast <- ECOFF_classified %>%
+  select(MNG, all_of(sir_cols)) %>%
+  mutate(MNG = as.character(MNG))
+
+tile_width  <- 0.10
+bar_gap     <- 0.02
+
+x_tree_max  <- max(tree_df$x, na.rm = TRUE)
+x_ast_start <- x_tree_max + 0.16
+
+x_positions <- setNames(
+  x_ast_start + seq(0, length(sir_cols) - 1) * (tile_width + bar_gap),
+  sir_labels
+)
+
+# MIC column immediately after the last antibiotic column
+x_MIC <- x_ast_start + length(sir_cols) * (tile_width + bar_gap)
+
+ast_meta <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  rename(y_pos = y) %>%
+  left_join(ast, by = "MNG") %>%
+  pivot_longer(cols = all_of(sir_cols), names_to = "antibiotic", values_to = "SIR") %>%
+  mutate(
+    antibiotic = factor(antibiotic, levels = sir_cols, labels = sir_labels),
+    SIR        = factor(ifelse(is.na(SIR), "NA", as.character(SIR)), levels = c("S", "R", "NA")),
+    x_pos      = x_positions[gsub("_SIR$", "", as.character(antibiotic))]
+  )
+
+# MIC meta — one row per tip
+mic_meta <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  rename(y_pos = y) %>%
+  left_join(TZ_isolates_MIC, by = "sample_id") %>%
+  mutate(
+    MIC_plot = factor(
+      case_when(
+        is.na(MIC)  ~ "No MIC data",
+        MIC <= 16   ~ "<=16",
+        MIC == 32   ~ "32",
+        MIC == 64   ~ "64",
+        MIC >= 128  ~ ">=128",
+        TRUE        ~ "No MIC data"
+      ),
+      levels = c("<=16", "32", "64", ">=128", "No MIC data")
+    )
+  )
+
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+cat("Checking ast_meta y_pos alignment:\n")
+ast_meta %>%
+  distinct(sample_id, y_pos) %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  mutate(aligned = y_pos == y) %>%
+  summarise(total = n(), correct = sum(aligned, na.rm = TRUE), incorrect = sum(!aligned, na.rm = TRUE)) %>%
+  print()
+
+cat("\nChecking alignment for Resistant isolates per antibiotic:\n")
+ast_meta %>%
+  filter(SIR == "R") %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  mutate(aligned = y_pos == y) %>%
+  group_by(antibiotic) %>%
+  summarise(total = n(), correct = sum(aligned), incorrect = sum(!aligned), .groups = "drop") %>%
+  print()
+
+cat("\nChecking ST617 alignment in AST meta:\n")
+ast_meta %>%
+  distinct(sample_id, y_pos, ST_plot) %>%
+  filter(ST_plot == "617") %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  select(sample_id, y_pos, y) %>%
+  mutate(aligned = y_pos == y) %>%
+  print()
+
+cat("\nMIC data summary:\n")
+print(table(mic_meta$MIC_plot, useNA = "always"))
+
+# ── 10. Alternating background bands ──────────────────────────────────────────
+band_data <- tip_data %>%
+  left_join(tip_y, by = c("sample_id" = "label")) %>%
+  arrange(y) %>%
+  mutate(run_id = cumsum(ST_plot != lag(ST_plot, default = first(ST_plot)))) %>%
+  group_by(run_id, ST_plot) %>%
+  summarise(y_min = min(y), y_max = max(y), .groups = "drop") %>%
+  arrange(y_min) %>%
+  mutate(band = row_number() %% 2) %>%
+  filter(band == 0)
+
+x_band_max <- x_MIC + tile_width + 0.1
+
+# ── 11. Build tree ─────────────────────────────────────────────────────────────
+p <- suppressWarnings(
+  ggtree(tree_grouped, layout = "rectangular",
+         aes(colour = ST_group), linewidth = 0.4)) +
+  geom_rect(
+    data = band_data,
+    aes(xmin = 0, xmax = x_band_max, ymin = y_min - 0.5, ymax = y_max + 0.5),
+    fill = "grey92", colour = NA, inherit.aes = FALSE, alpha = 0.6
+  ) +
+  geom_tree(aes(colour = ST_group), linewidth = 0.4) +
+  scale_colour_manual(
+    name     = "Sequence Type",
+    values   = all_st_colours,
+    breaks   = c(named_sts, "Other"),
+    labels   = c(ifelse(named_sts == "Novel", "Novel", paste0("ST", named_sts)), "Other"),
+    na.value = "grey40",
+    guide    = "none"
+  ) +
+  geom_tippoint(aes(colour = ST_group), size = 1.5, show.legend = FALSE) +
+  ggrepel::geom_text_repel(
+    data            = st_positions,
+    aes(x = x_mrca, y = y_mid, label = st_label, colour = ST_plot),
+    size            = 4.5, fontface = "bold.italic",
+    hjust           = 1, direction = "y",
+    nudge_x         = -0.15,
+    segment.size    = 0.15, segment.colour = "grey50",
+    box.padding     = 0.15, force = 1,
+    max.overlaps    = Inf, inherit.aes = FALSE, show.legend = FALSE,
+    bg.colour       = "white", bg.r = 0.15
+  ) +
+  theme_tree() +
+  theme(plot.margin = unit(c(4, 1, 1, 0), "cm")) +
+  xlim(-0.05, x_band_max + 0.2) +
+
+  # ── AST tiles ──
+  new_scale_colour() +
+  new_scale_fill() +
+  geom_tile(
+    data        = ast_meta,
+    aes(x = x_pos, y = y_pos, fill = SIR),
+    width       = tile_width,
+    height      = 1,
+    inherit.aes = FALSE,
+    colour      = "white", linewidth = 0.3
+  ) +
+  scale_fill_manual(
+    name   = "Disk Diffusion S/R",
+    values = c("S" = "#4DAF4A", "R" = "#E41A1C", "NA" = "grey70"),
+    labels = c("S" = "Susceptible", "R" = "Resistant", "NA" = "N/A"),
+    guide  = guide_legend(order = 1, override.aes = list(size = 6))
+  ) +
+
+  # ── NIT-MIC tiles ──
+  new_scale_fill() +
+  geom_tile(
+    data        = mic_meta,
+    aes(x = x_MIC, y = y_pos, fill = MIC_plot),
+    width       = tile_width,
+    height      = 1,
+    inherit.aes = FALSE,
+    colour      = "white", linewidth = 0.3
+  ) +
+  scale_fill_manual(
+    name   = "NIT-MIC\n(mg/L)",
+    values = c(
+      "<=16"        = "#4DAF4A",
+      "32"          = "#FFD700",
+      "64"          = "#FF6600",
+      ">=128"       = "#CC0000",
+      "No MIC data" = "grey70"
+    ),
+    labels = c(
+      "<=16"        = "<=16",
+      "32"          = "32",
+      "64"          = "64",
+      ">=128"       = ">=128",
+      "No MIC data" = "No MIC data"
+    ),
+    na.value = "grey70",
+    drop = FALSE,
+    guide  = guide_legend(order = 2, override.aes = list(size = 6))
+  ) +
+
+  theme(
+    legend.position  = "right",
+    legend.text      = element_text(size = 16),
+    legend.title     = element_text(size = 18, face = "bold"),
+    legend.key.size  = unit(1.2, "cm"),
+    legend.spacing.y = unit(0.3, "cm")
+  ) +
+  guides(colour = "none") +
+  coord_cartesian(clip = "off")
+
+# ── 12. Column headings ────────────────────────────────────────────────────────
+y_label <- n_tips + n_tips * 0.02
+for (i in seq_along(sir_labels)) {
+  p <- p + annotate("text", x = x_positions[sir_labels[i]], y = y_label,
+                    label = sir_labels_clean[i],
+                    size = 6, fontface = "bold", hjust = 0, angle = 45)
+}
+
+# NIT-MIC column heading
+p <- p + annotate("text", x = x_MIC, y = y_label,
+                  label = "NIT-MIC",
+                  size = 6, fontface = "bold", hjust = 0, angle = 45)
+
+# ── 13. Save ───────────────────────────────────────────────────────────────────
+ggsave("/Users/harryhocking/tree_TZ_AST_v10.pdf", p, width = 24, height = 35)
+ggsave("/Users/harryhocking/tree_TZ_AST_v10.png", p, width = 24, height = 35, dpi = 600)
