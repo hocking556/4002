@@ -1,4 +1,4 @@
-#### script for running RGI #####
+#### script for running RGI ######
 
 #! /bin/bash
 #SBATCH -D /mnt/shared/scratch/hhocking/
