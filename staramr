@@ -1,0 +1,37 @@
+##### script used for running stararm ###
+
+#!/bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=staramr
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=short
+#SBATCH --mem=4G
+#SBATCH --output=logs/staramr_%A_%a.out
+#SBATCH --error=logs/staramr_%A_%a.err
+
+# Create logs directory
+mkdir -p logs
+
+# Activate staramr environment
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/staramr
+
+# Read library names
+mapfile -t libraries < libs.txt
+
+# Create output directory
+mkdir -p staramr_results_fna
+
+# Get current sample name
+SAMPLE=${libraries[${SLURM_ARRAY_TASK_ID}]}
+
+# Run staramr search
+staramr search \
+    --pointfinder-organism escherichia_coli \
+    --output-dir staramr_results_fna/${SAMPLE} \
+    --nprocs ${SLURM_CPUS_PER_TASK} \
+    /mnt/shared/scratch/hhocking/fna/${SAMPLE}.fna
+
+echo "Completed staramr for ${SAMPLE}"
