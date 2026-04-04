@@ -1,0 +1,48 @@
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# --- Input ---
+Res_DD <- read.csv('/Users/harryhocking/Res_DD_detail.csv')
+
+# --- Parsing ---
+Res_DD$ECOFF.classified <- trimws(Res_DD$ECOFF.classified)
+
+df_long <- Res_DD %>%
+  pivot_longer(cols = -ECOFF.classified,
+               names_to = "Antibiotic",
+               values_to = "Value") %>%
+  rename(Metric = ECOFF.classified) %>%
+  mutate(Metric = trimws(Metric))
+
+df_plot <- df_long %>%
+  filter(Metric %in% c("WGS=S/AST=S", "WGS=R/AST=R", "Major Error %", "Very Major Errors")) %>%
+  mutate(Metric = recode(Metric,
+                         "WGS=S/AST=S"      = "WGS=S/AST=S",
+                         "WGS=R/AST=R"      = "WGS=R/AST=R",
+                         "Major Error %"    = "WGS=R/AST=S",
+                         "Very Major Errors" = "WGS=S/AST=R"
+  )) %>%
+  mutate(Metric = factor(Metric, levels = c("WGS=S/AST=R", "WGS=R/AST=S", "WGS=S/AST=S", "WGS=R/AST=R")))
+
+# --- Plot ---
+ggplot(df_plot, aes(x = Value, y = reorder(Antibiotic, Value), fill = Metric)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = c(
+    "WGS=S/AST=S" = "steelblue",
+    "WGS=R/AST=R" = "darkblue",
+    "WGS=R/AST=S" = "orange",
+    "WGS=S/AST=R" = "firebrick"
+  )) +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  labs(
+    x     = "Percentage (%)",
+    y     = "Antibiotic",
+    fill  = NULL,
+    title = "Concordance between ResFinder phenotype predictions and disc diffusion data classified by ECOFF"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(reverse = TRUE))
+
+ggsave("/Users/harryhocking/RES_DD_v16.pdf", width = 24, height = 8, dpi = 300)
