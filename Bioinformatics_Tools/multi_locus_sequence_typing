@@ -1,0 +1,19 @@
+#! /bin/bash
+#SBATCH -D /mnt/shared/scratch/hhocking/
+#SBATCH --job-name=mlst
+#SBATCH --array=0-744
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --partition=hicpu
+#SBATCH --mem=1G
+
+source /mnt/apps/users/hhocking/conda/bin/activate /mnt/apps/users/hhocking/conda/envs/mlst
+
+mapfile -t libraries < libs.txt
+
+mkdir -p /mnt/shared/scratch/hhocking/mlst_out
+
+mlst  --scheme ecoli_achtman_4 /mnt/shared/scratch/hhocking/data/assemblies/${libraries[${SLURM_ARRAY_TASK_ID}]}.fasta \
+     > /mnt/shared/scratch/hhocking/mlst_out/${libraries[${SLURM_ARRAY_TASK_ID}]}.tsv \
+     --full
