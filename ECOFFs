@@ -1,5 +1,5 @@
 https://mic.eucast.org/search/
-
+Disk Diffusion ECOFFs - E.coli
 Abx 	   EUCAST ECOFF 13/03/2026	
 "AK",	17	
 "AMC",	14	
@@ -16,3 +16,6 @@ Abx 	   EUCAST ECOFF 13/03/2026
 "TET",	21	n e.coli ATCC 25922
 "TZP",	19	
 "W",	20	
+
+MIC ECOFFs - E.coli Nitrofurantoin 
+NIT - 64 mg/l 
